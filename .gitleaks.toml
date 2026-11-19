@@ -1,4 +1,4 @@
-title = "ncp-mcp gitleaks config"
+title = "ncloud-mcp-server gitleaks config"
 
 [extend]
 useDefault = true
