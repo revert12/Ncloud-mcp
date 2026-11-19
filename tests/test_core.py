@@ -28,7 +28,13 @@ def test_signature_is_deterministic():
         ("GET", "/getServerInstanceList/x", True, False),
         ("GET", "/get", True, False),
         ("GET", "/", True, False),
-        ("POST", "/getServerInstanceList", True, False),
+        # the shared gateway takes GET and POST alike ("GET | POST" in the API docs)
+        ("POST", "/getServerInstanceList", True, True),
+        ("POST", "/terminateServerInstances", True, False),
+        ("PUT", "/getServerInstanceList", True, False),
+        ("DELETE", "/getServerInstanceList", True, False),
+        # camelCase nouns that look like verbs
+        ("GET", "/timeZone", False, True),
         # REST-style services
         ("GET", "/sub-accounts", False, True),
         ("GET", "/sub-accounts/123", False, True),

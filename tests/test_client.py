@@ -270,6 +270,102 @@ def test_bad_inputs_raise_callerror(kw):
         run(ok_handler, **args)
 
 
+@pytest.mark.parametrize("params", [
+    {"pageSize": "abc"}, {"pageSize": 0}, {"pageSize": True}, {"pageSize": 2.5},
+    {"pageNo": -1}, {"size": "x"}, {"page": -1},
+])
+def test_bad_paging_params_rejected_before_network(params):
+    def handler(req):
+        raise AssertionError("must not send")
+
+    with pytest.raises(CallError, match=f"'{next(iter(params))}' must be an integer"):
+        run(handler, service="vserver", action="getServerInstanceList", params=params)
+
+
+@pytest.mark.parametrize("params", [{"pageNo": 0, "pageSize": 2}, {"pageSize": "2"}, {"page": 0}])
+def test_valid_paging_params_accepted(params):
+    run(server_list_handler(), service="vserver", action="getServerInstanceList", params=params)
+
+
+def test_paginate_must_be_bool():
+    with pytest.raises(CallError, match="paginate"):
+        run(ok_handler, service="vserver", action="getRegionList", paginate="false")
+
+
+# ---- result size cap ----------------------------------------------------------------
+
+def big_list_handler(n=200):
+    def handler(req):
+        items = [{"serverInstanceNo": str(i), "memo": "x" * 500} for i in range(n)]
+        return httpx.Response(200, json={"getServerInstanceListResponse":
+                                         {"totalRows": n, "serverInstanceList": items}})
+    return handler
+
+
+def test_large_list_is_trimmed_to_limit():
+    r = run(big_list_handler(), service="vserver", action="getServerInstanceList", max_chars=20_000)
+    assert len(json.dumps(r, ensure_ascii=False)) <= 20_000
+    kept = len(items_of(r))
+    assert 0 < kept < 200
+    assert r["truncated"]["returned"] == kept and r["truncated"]["total"] == 200
+    assert "fields" in r["truncated"]["reason"]
+    assert r["paging"]["complete"] is False
+
+
+def test_small_result_is_untouched():
+    r = run(server_list_handler(), service="vserver", action="getServerInstanceList", max_chars=20_000)
+    assert "truncated" not in r and len(items_of(r)) == 5
+
+
+def test_non_list_result_is_cut_as_text():
+    def handler(req):
+        return httpx.Response(200, json={"blob": "y" * 50_000})
+
+    r = run(handler, service="vserver", action="getRegionList", max_chars=20_000)
+    assert len(json.dumps(r, ensure_ascii=False)) <= 20_000
+    assert isinstance(r["data"], str) and "cut JSON text" in r["truncated"]["reason"]
+
+
+# ---- write allowlist methods --------------------------------------------------------
+
+@pytest.mark.parametrize("allow,method,action,ok", [
+    # shared gateway: GET and POST are the same call, either entry form allows both
+    ("vserver:stopServerInstances", "GET", "stopServerInstances", True),
+    ("vserver:stopServerInstances", "POST", "stopServerInstances", True),
+    ("POST vserver:stopServerInstances", "GET", "stopServerInstances", True),
+    ("vserver:stopServerInstances", "DELETE", "stopServerInstances", False),
+    ("vserver:stopServerInstances", "POST", "startServerInstances", False),
+    # REST services: methods are distinct
+    ("POST subaccount:/sub-accounts", "POST", "/sub-accounts", True),
+    ("POST subaccount:/sub-accounts", "POST", "sub-accounts", True),
+    ("post subaccount:sub-accounts", "POST", "/sub-accounts", True),
+    ("POST subaccount:/sub-accounts", "DELETE", "/sub-accounts", False),
+    ("subaccount:/sub-accounts", "POST", "/sub-accounts", False),
+    ("DELETE subaccount:/sub-accounts/1", "DELETE", "/sub-accounts/1", True),
+])
+def test_write_allowlist_matches_method(monkeypatch, allow, method, action, ok):
+    monkeypatch.setenv("NCP_ALLOW_WRITE", "true")
+    monkeypatch.setenv("NCP_WRITE_ALLOWLIST", allow)
+    service = "vserver" if "vserver" in allow else "subaccount"
+    if ok:
+        assert run(ok_handler, service=service, action=action, method=method, mode="write")["status"] == 200
+    else:
+        with pytest.raises(CallError, match="NCP_WRITE_ALLOWLIST"):
+            run(ok_handler, service=service, action=action, method=method, mode="write")
+
+
+def test_shared_post_read_goes_to_ncp_call(monkeypatch):
+    monkeypatch.setenv("NCP_ALLOW_WRITE", "true")
+    with pytest.raises(CallError, match="use ncp_call"):
+        run(ok_handler, service="vserver", action="getServerInstanceList", method="POST", mode="write")
+
+
+def test_shared_block_message_suggests_entry_without_method(monkeypatch):
+    monkeypatch.setenv("NCP_ALLOW_WRITE", "true")
+    with pytest.raises(CallError, match="'vserver:/stopServerInstances'"):
+        run(ok_handler, service="vserver", action="stopServerInstances", method="POST", mode="write")
+
+
 # ---- batch isolation (server layer) -------------------------------------------------
 
 def test_batch_isolates_failures(monkeypatch, tmp_path):
@@ -295,9 +391,11 @@ def test_batch_isolates_failures(monkeypatch, tmp_path):
         {"service": "vserver", "action": "getRegionList", "params": {"boom": 1}},
         {"service": "vserver", "action": "getRegionList", "method": "POST"},
         {"service": "vserver", "action": "getRegionList"},
+        {"service": "vserver", "action": "getRegionList", "paginate": "false"},
     ]))
-    assert out["count"] == 7 and out["failed"] == 5
-    assert [r["index"] for r in out["results"]] == list(range(7))
+    assert out["count"] == 8 and out["failed"] == 6
+    assert [r["index"] for r in out["results"]] == list(range(8))
     assert out["results"][0]["status"] == 200 and out["results"][6]["status"] == 200
     assert "internal error (RuntimeError)" in out["results"][4]["error"]
+    assert "JSON boolean" in out["results"][7]["error"]
     assert json.dumps(out).find("SK") == -1

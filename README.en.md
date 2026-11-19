@@ -46,12 +46,21 @@ ncp_batch(calls=[
   `kubeconfig`) are blocked in `ncp_call` and `ncp_batch`. If you really need one, add it to
   `NCP_WRITE_ALLOWLIST` and call it with `ncp_write`.
 - Writes are possible only through `ncp_write`, which appears only when the server runs with
-  `NCP_ALLOW_WRITE=true`. Each action must also be listed in `NCP_WRITE_ALLOWLIST`
-  (e.g. `vserver:stopServerInstances`). Write requests are never retried.
+  `NCP_ALLOW_WRITE=true`. Each action must also be listed in `NCP_WRITE_ALLOWLIST` (comma separated).
+  Write requests are never retried.
+  - For shared-gateway services, write `vserver:stopServerInstances`. The shared gateway takes
+    GET and POST as the same call, so both are allowed.
+  - For REST-style services, put the method first: `POST subaccount:/sub-accounts`,
+    `DELETE subaccount:/sub-accounts/123`. An entry without a method allows GET only,
+    and allowing POST on a path does not allow DELETE on it.
+  - If you used an entry like `subaccount:/sub-accounts` for POST with 0.5.x or earlier, add the method.
 - Callable services are limited to a per-zone allowlist (`src/ncp_mcp/endpoints.py`, based on the official
   NCP API docs). To use a service that is not listed, add it explicitly, e.g. `NCP_MCP_EXTRA_SERVICES="gov:cdn"`.
 - Read requests are retried up to 2 times on 429, 5xx and timeouts (`NCP_MCP_RETRIES`), and concurrent
   requests are limited to 5 (`NCP_MCP_CONCURRENCY`).
+- A single result is capped at 100,000 characters of JSON, about 25,000 tokens (`NCP_MCP_MAX_RESULT_CHARS`).
+  Beyond that, only the first list items are kept and `truncated` explains why. `ncp_batch` splits this
+  budget across its calls. If a result was cut, use `fields` to keep only the columns you need, or narrow the query.
 - Every tool carries the standard MCP hints (`readOnlyHint` / `destructiveHint`). In your client's
   permission settings we recommend **allowing `ncp_call` and `ncp_batch`, and asking every time for `ncp_write`**.
   (Claude Code example: `mcp__ncp__ncp_call` in `permissions.allow`, `mcp__ncp__ncp_write` in `permissions.ask`)
@@ -69,7 +78,7 @@ Requires Python 3.10+ and [uv](https://docs.astral.sh/uv/).
   "mcpServers": {
     "ncp": {
       "command": "uvx",
-      "args": ["--from", "git+https://github.com/revert12/Ncloud-mcp@v0.5.0", "ncp-mcp"]
+      "args": ["--from", "git+https://github.com/revert12/Ncloud-mcp@v0.6.0", "ncp-mcp"]
     }
   }
 }
@@ -124,8 +133,9 @@ The Ncloud CLI can use the same profiles with `--profile <name>`.
 ```sh
 uv sync
 uv run pytest
-git config core.hooksPath .githooks   # gitleaks secret scan before each commit
 ```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, the pre-commit secret scan, and how the read-only guard is verified.
 
 ## License
 

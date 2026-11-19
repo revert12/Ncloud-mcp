@@ -41,6 +41,8 @@ MAX_PAGE_SIZE = 1000
 MAX_ERROR_BODY = 2000
 RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
 MAX_BACKOFF = 10.0
+# Upper bound on one result, measured as characters of its JSON text (~4 chars per token).
+MAX_RESULT_CHARS = _env_int("NCP_MCP_MAX_RESULT_CHARS", 100_000, 10_000, 2_000_000)
 
 _sem: asyncio.Semaphore | None = None
 
@@ -208,6 +210,85 @@ async def _send(
         return resp.status_code, payload, attempts
 
 
+# Paging parameters and their lowest valid value (pageNo 0 = first page; page is 0-based).
+PAGING_PARAMS = {"pageNo": 0, "pageSize": 1, "page": 0, "size": 1}
+
+
+def _int_param(params: dict[str, Any], key: str, lowest: int = 1) -> int | None:
+    """Read an integer paging parameter (>= lowest), or None if absent."""
+    value = params.get(key)
+    if value is None or value == "":
+        return None
+    error = CallError(f"parameter '{key}' must be an integer >= {lowest}, got {value!r}")
+    if isinstance(value, bool) or isinstance(value, float) and not value.is_integer():
+        raise error
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        raise error from None
+    if n < lowest:
+        raise error
+    return n
+
+
+def _json_len(value: Any) -> int:
+    return len(json.dumps(value, ensure_ascii=False, default=str))
+
+
+def _cap_result(result: dict[str, Any], limit: int) -> None:
+    """Trim result['data'] in place so the whole result stays within ``limit`` characters.
+
+    List responses keep as many leading items as fit; anything else is replaced by its
+    JSON text cut to fit. The result then carries 'truncated' with the reason.
+    """
+    if _json_len(result) <= limit:
+        return
+    data = result.get("data")
+    target = _find_page(data)
+    if target:
+        node, key, _ = target
+    elif _find_rest_page(data):
+        node, key = data, "items"
+    else:
+        node = key = None
+
+    hint = ("result exceeded {limit} characters; request fewer columns with 'fields' "
+            "or narrow the query with params (raise NCP_MCP_MAX_RESULT_CHARS to allow more)")
+    if node is not None:
+        items = node[key]
+        lo, hi = 0, len(items)
+        while lo < hi:  # largest n whose result still fits
+            mid = (lo + hi + 1) // 2
+            node[key] = items[:mid]
+            if _json_len(result) <= limit:
+                lo = mid
+            else:
+                hi = mid - 1
+        node[key] = items[:lo]
+        prev = result.get("truncated") or {}
+        result["truncated"] = {
+            "returned": lo,
+            "total": prev.get("total", len(items)),
+            "reason": hint.format(limit=limit),
+        }
+        if "paging" in result:
+            result["paging"]["complete"] = False
+        if _json_len(result) <= limit:
+            return
+    result["truncated"] = {"returned": None, "total": None,
+                           "reason": hint.format(limit=limit) + "; data is cut JSON text"}
+    text = json.dumps(data, ensure_ascii=False, default=str)
+    lo, hi = 0, len(text)
+    while lo < hi:  # longest prefix that fits once re-encoded (quotes get escaped)
+        mid = (lo + hi + 1) // 2
+        result["data"] = text[:mid]
+        if _json_len(result) <= limit:
+            lo = mid
+        else:
+            hi = mid - 1
+    result["data"] = text[:lo]
+
+
 def _check_inputs(params: Any, fields: Any, body: Any) -> None:
     if params is not None and not isinstance(params, dict):
         raise CallError("params must be an object (JSON dict)")
@@ -230,10 +311,16 @@ async def call(
     paginate: bool = True,
     fields: list[str] | None = None,
     mode: str = "read",
+    max_chars: int | None = None,
 ) -> dict[str, Any]:
     if not isinstance(service, str) or not isinstance(method, str):
         raise CallError("service and method must be strings")
     _check_inputs(params, fields, body)
+    if not isinstance(paginate, bool):
+        raise CallError("paginate must be true or false")
+    for key, lowest in PAGING_PARAMS.items():
+        if params and key in params:
+            _int_param(params, key, lowest)
     method = method.upper()
     if method not in ("GET", "POST", "PUT", "PATCH", "DELETE"):
         raise CallError(f"unsupported method {method}")
@@ -248,7 +335,8 @@ async def call(
 
     path = _build_path(base, action)
     rel = path[len(base.rstrip("/")):]
-    read_only = guard.is_read_only(method, rel, endpoints.is_shared(profile.zone, service))
+    shared = endpoints.is_shared(profile.zone, service)
+    read_only = guard.is_read_only(method, rel, shared)
     sensitive = guard.is_sensitive(rel)
     if mode == "read" and sensitive:
         raise CallError(
@@ -270,10 +358,14 @@ async def call(
             raise CallError(f"{method} {path} is read-only; use ncp_call instead.")
         if not guard.write_allowed():
             raise CallError("writes are disabled (start the server with NCP_ALLOW_WRITE=true).")
-        if not guard.write_permitted(service, action):
+        if not guard.write_permitted(method, service, action, shared):
+            entry = guard.write_key(method, service, action)
+            if method == "GET" or (shared and method == "POST"):
+                entry = entry.split(" ", 1)[1]  # GET/POST on the shared gateway: no method needed
             raise CallError(
-                f"blocked: '{service}:{action.strip()}' is not in NCP_WRITE_ALLOWLIST. "
-                "Each write action must be allowed explicitly."
+                f"blocked: '{entry}' is not in NCP_WRITE_ALLOWLIST. Each write action must be "
+                "allowed explicitly, with its HTTP method unless it is GET "
+                "(e.g. 'vserver:stopServerInstances', 'POST subaccount:/sub-accounts')."
             )
 
     params = dict(params or {})
@@ -317,6 +409,7 @@ async def call(
         else:
             result["fields_note"] = "no list found in response; fields ignored"
     result["data"] = data
+    _cap_result(result, max_chars or MAX_RESULT_CHARS)
     return result
 
 
@@ -347,7 +440,7 @@ async def _paginate(
             return {"_data": data, "auto": False, "complete": False, "pages": 1,
                     "returned": got, "total": total, "reason": "paginate=false"}
         # Server returned fewer than totalRows: refetch consistently page by page.
-        size = max(1, min(int(params.get("pageSize") or got or 100), MAX_PAGE_SIZE))
+        size = max(1, min(_int_param(params, "pageSize") or got or 100, MAX_PAGE_SIZE))
         items: list = []
         pages = 0
         reason = None
@@ -385,7 +478,7 @@ async def _paginate(
         if not paginate:
             return {"_data": data, "auto": False, "complete": False, "pages": 1,
                     "returned": len(items), "total": total, "reason": "paginate=false"}
-        size = int(params.get("size") or len(items) or 10)
+        size = min(_int_param(params, "size") or len(items) or 10, MAX_PAGE_SIZE)
         pages, reason, has_next = 1, None, True
         for page_no in range(1, MAX_PAGES):
             q = dict(params, page=page_no, size=size)

@@ -4,15 +4,26 @@ Shared-gateway Ncloud actions are verb-first camelCase names
 (getServerInstanceList, terminateServerInstances, ...) and accept GET even for
 destructive actions, so the HTTP method alone is not enough.
 
+The shared gateway takes GET and POST alike for every action (the API docs list
+"GET | POST", e.g. https://api.ncloud-docs.com/docs/en/compute-vserver-server-getserverinstancelist;
+the official SDK uses POST), so there POST is treated exactly like GET.
+
 Read-only rules (anything not proven read-only is treated as a write):
-  * non-GET -> write
+  * non-GET -> write (POST counts as GET on the shared gateway)
   * shared-gateway service (/<service>/v2/<action>): read only if the action is exactly
     one segment, verb-first camelCase, with the verb in READ_VERBS
     (getServerInstanceList). Lowercase, PascalCase or nested paths are writes, so a
     gateway that is lenient about case or trailing segments cannot be used to sneak a
     destructive action through the read-only tools.
   * other services (REST style, e.g. /sub-accounts/{id}, /cost/getDemandCostList):
-    write if ANY segment is verb-first camelCase with a non-read verb, else read
+    write if ANY segment is verb-first camelCase with a non-read verb, else read.
+    Some of these services change state over GET (vcdss /cluster/restartKafkaService/{id},
+    vses /import/stopDataImportJob/{id}), which is why every segment is checked.
+    NOUN_SEGMENTS lists camelCase nouns that only look like verbs (timeZone).
+
+tests/data/ncp_sdk_apis.txt is every API in the official SDK; tests check that each
+read passes and each state-changing GET is blocked. CONTRIBUTING.md explains how to
+refresh it.
 
 Sensitive actions (SENSITIVE) return credentials such as server root passwords or
 kubeconfigs. They are refused by the read-only tools and, like writes, can only be
@@ -20,9 +31,12 @@ called through ncp_write with an explicit NCP_WRITE_ALLOWLIST entry.
 
 Writes need BOTH:
   * NCP_ALLOW_WRITE=true
-  * the exact "service:action" listed in NCP_WRITE_ALLOWLIST
-    (comma separated, e.g. "vserver:stopServerInstances,vserver:startServerInstances";
-    for REST services the action is the path, e.g. "subaccount:/sub-accounts")
+  * a matching entry in NCP_WRITE_ALLOWLIST (comma separated), "[METHOD ]service:action":
+      vserver:stopServerInstances          -> GET and POST (shared gateway: same thing)
+      POST subaccount:/sub-accounts        -> POST only
+      DELETE subaccount:/sub-accounts/123  -> DELETE only
+    An entry without a method means GET. On REST services methods are distinct, so
+    allowing a path for POST never also allows DELETE on it.
 """
 
 from __future__ import annotations
@@ -37,6 +51,11 @@ SENSITIVE = frozenset({
     "getrootpassword",                    # server / vserver: root/admin password
     "getrootpasswordserverinstancelist",  # vserver: root passwords of many servers
     "kubeconfig",                         # vnks: GET /clusters/{uuid}/kubeconfig
+})
+
+# REST path segments that look verb-first but are nouns (from the official SDK API list).
+NOUN_SEGMENTS = frozenset({
+    "timeZone",  # sourcepipeline / vsourcepipeline: GET /timeZone
 })
 
 _VERB_RE = re.compile(r"^([a-z]+)[A-Z]")
@@ -58,9 +77,14 @@ def _segments(action: str) -> list[str]:
     return [s for s in action.split("?", 1)[0].split("/") if s]
 
 
+def _effective_method(method: str, shared: bool) -> str:
+    m = method.strip().upper()
+    return "GET" if shared and m == "POST" else m
+
+
 def is_read_only(method: str, action: str, shared: bool = False) -> bool:
     """``action`` is the path under the service base, e.g. 'getServerInstanceList'."""
-    if method.upper() != "GET":
+    if _effective_method(method, shared) != "GET":
         return False
     segs = _segments(action)
     if shared:
@@ -69,6 +93,8 @@ def is_read_only(method: str, action: str, shared: bool = False) -> bool:
         m = _SHARED_ACTION_RE.match(segs[0])
         return bool(m) and m.group(1) in READ_VERBS
     for seg in segs:
+        if seg in NOUN_SEGMENTS:
+            continue
         m = _VERB_RE.match(seg)
         if m and m.group(1) not in READ_VERBS:
             return False
@@ -85,17 +111,29 @@ def write_allowed() -> bool:
 
 
 def write_allowlist() -> frozenset[str]:
-    raw = os.environ.get("NCP_WRITE_ALLOWLIST", "")
-    return frozenset(x.strip() for x in raw.split(",") if x.strip())
+    """Normalized entries: 'METHOD service:/action' (method defaults to GET)."""
+    out = set()
+    for raw in os.environ.get("NCP_WRITE_ALLOWLIST", "").split(","):
+        entry = raw.strip()
+        if not entry:
+            continue
+        method, _, rest = entry.partition(" ")
+        if not rest:  # no method given
+            method, rest = "GET", entry
+        svc, sep, act = rest.strip().partition(":")
+        if sep:
+            out.add(write_key(method, svc, act))
+    return frozenset(out)
 
 
-def _norm_action(action: str) -> str:
-    return action.strip()
+def write_key(method: str, service: str, action: str) -> str:
+    """Canonical allowlist form, e.g. 'POST subaccount:/sub-accounts'."""
+    return f"{method.strip().upper()} {service.strip().lower()}:/{action.strip().lstrip('/')}"
 
 
-def write_permitted(service: str, action: str) -> bool:
+def write_permitted(method: str, service: str, action: str, shared: bool = False) -> bool:
     allow = write_allowlist()
-    s = service.strip().lower()
-    a = _norm_action(action)
-    candidates = {f"{s}:{a}", f"{s}:{a.lstrip('/')}", f"{s}:/{a.lstrip('/')}"}
-    return bool(candidates & allow)
+    if _effective_method(method, shared) == "GET" and shared:
+        # GET and POST are the same call on the shared gateway: either entry form counts.
+        return any(write_key(m, service, action) in allow for m in ("GET", "POST"))
+    return write_key(method, service, action) in allow

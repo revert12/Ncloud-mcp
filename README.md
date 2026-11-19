@@ -45,10 +45,16 @@ ncp_batch(calls=[
 - 조회 동작이지만 **비밀값을 돌려주는 동작**(`getRootPassword`, `getRootPasswordServerInstanceList`, NKS `kubeconfig`)은
   `ncp_call`·`ncp_batch`에서 막습니다. 꼭 필요하면 `NCP_WRITE_ALLOWLIST`에 적은 뒤 `ncp_write`로 호출하세요.
 - 변경은 `ncp_write`로만 할 수 있고, 이 도구는 서버를 `NCP_ALLOW_WRITE=true`로 실행했을 때만 나타납니다.
-  그리고 호출할 동작을 `NCP_WRITE_ALLOWLIST`에 하나씩 적어야 합니다(예: `vserver:stopServerInstances`). 변경 요청은 재시도하지 않습니다.
+  그리고 호출할 동작을 `NCP_WRITE_ALLOWLIST`에 쉼표로 구분해 하나씩 적어야 합니다. 변경 요청은 재시도하지 않습니다.
+  - 공용 게이트웨이 서비스는 `vserver:stopServerInstances`처럼 적습니다. 공용 게이트웨이는 GET과 POST를 같은 호출로 받으므로 둘 다 허용됩니다.
+  - REST 형식 서비스는 메서드를 앞에 적습니다: `POST subaccount:/sub-accounts`, `DELETE subaccount:/sub-accounts/123`.
+    메서드를 생략하면 GET만 허용하고, 같은 경로라도 POST만 허용하면 DELETE는 막힙니다.
+  - 0.5.x 이하에서 `subaccount:/sub-accounts`처럼 메서드 없이 적어 POST 등을 쓰고 있었다면 메서드를 붙여 주세요.
 - 호출할 수 있는 서비스는 존별 허용 목록(`src/ncp_mcp/endpoints.py`, NCP 공식 API 문서 기준)으로 제한합니다.
   목록에 없는 서비스는 `NCP_MCP_EXTRA_SERVICES="gov:cdn"`처럼 직접 추가해야 합니다.
 - 조회 요청은 429·5xx·시간 초과 때 최대 2번 다시 시도하고(`NCP_MCP_RETRIES`), 동시 요청은 5개로 제한합니다(`NCP_MCP_CONCURRENCY`).
+- 결과 하나는 JSON 기준 10만 자(약 2만 5천 토큰)를 넘지 않습니다(`NCP_MCP_MAX_RESULT_CHARS`). 넘으면 목록 앞부분만 남기고
+  `truncated`에 이유를 적습니다. `ncp_batch`는 이 한도를 호출 수로 나눠 씁니다. 잘렸다면 `fields`로 필요한 필드만 받거나 조건을 좁히세요.
 - 도구마다 MCP 표준 표시(`readOnlyHint`/`destructiveHint`)를 붙였습니다. 클라이언트 권한 설정에서
   **`ncp_call`·`ncp_batch`는 허용, `ncp_write`는 매번 확인**으로 나눠 두는 것을 권장합니다.
   (Claude Code 예: `permissions.allow`에 `mcp__ncp__ncp_call`, `permissions.ask`에 `mcp__ncp__ncp_write`)
@@ -65,7 +71,7 @@ Python 3.10 이상, [uv](https://docs.astral.sh/uv/) 필요.
   "mcpServers": {
     "ncp": {
       "command": "uvx",
-      "args": ["--from", "git+https://github.com/revert12/Ncloud-mcp@v0.5.0", "ncp-mcp"]
+      "args": ["--from", "git+https://github.com/revert12/Ncloud-mcp@v0.6.0", "ncp-mcp"]
     }
   }
 }
@@ -118,8 +124,9 @@ Ncloud CLI는 `--profile <이름>`으로 같은 프로필을 쓸 수 있습니�
 ```sh
 uv sync
 uv run pytest
-git config core.hooksPath .githooks   # 커밋 전 gitleaks 비밀값 검사
 ```
+
+개발 환경, 커밋 전 비밀값 검사, 읽기 전용 판정의 검증 방법은 [CONTRIBUTING.md](CONTRIBUTING.md)(영어)를 보세요.
 
 ## 라이선스
 
