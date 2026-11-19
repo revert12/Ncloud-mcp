@@ -399,3 +399,32 @@ def test_batch_isolates_failures(monkeypatch, tmp_path):
     assert "internal error (RuntimeError)" in out["results"][4]["error"]
     assert "JSON boolean" in out["results"][7]["error"]
     assert json.dumps(out).find("SK") == -1
+
+
+def test_batch_reads_config_once(monkeypatch, tmp_path):
+    cfg = tmp_path / "configure"
+    cfg.write_text("[test-pub]\nncloud_access_key_id = AK\nncloud_secret_access_key = SK\n"
+                   "ncloud_zone = pub\n", encoding="utf-8")
+    monkeypatch.setenv("NCP_MCP_CONFIG", str(cfg))
+    for v in ("NCLOUD_ACCESS_KEY", "NCLOUD_SECRET_KEY", "NCLOUD_ZONE"):
+        monkeypatch.delenv(v, raising=False)
+    from ncp_mcp import server
+
+    reads = []
+    real = server.load_profiles
+
+    def counting():
+        reads.append(1)
+        return real()
+
+    monkeypatch.setattr(server, "load_profiles", counting)
+    monkeypatch.setattr(server, "_http", lambda: httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda req: httpx.Response(200, json={"getRegionListResponse": {"totalRows": 0, "regionList": []}})
+    )))
+    out = asyncio.run(server.ncp_batch(
+        [{"service": "vserver", "action": "getRegionList"}] * 10
+        + [{"service": "vserver", "action": "getRegionList", "profile": "nope-pub"}]
+    ))
+    assert len(reads) == 1
+    assert out["count"] == 11 and out["failed"] == 1
+    assert "unknown profile 'nope-pub'" in out["results"][10]["error"]

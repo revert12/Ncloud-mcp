@@ -12,7 +12,7 @@ from mcp.types import ToolAnnotations
 
 from . import __version__, guard
 from .client import MAX_RESULT_CHARS, TIMEOUT, CallError, call
-from .config import Profile, load_profiles
+from .config import LoadResult, Profile, load_profiles
 
 MAX_BATCH = 50
 BATCH_CONCURRENCY = 5
@@ -46,8 +46,10 @@ mcp = MCPServer(
 )
 
 
-def _pick(profile: str | None) -> Profile:
-    res = load_profiles()
+def _pick(profile: str | None, res: LoadResult | None = None) -> Profile:
+    """Resolve a profile. Pass ``res`` to reuse one config read (ncp_batch does)."""
+    if res is None:
+        res = load_profiles()
     usable = res.profiles
     if profile:
         if profile in usable:
@@ -178,6 +180,11 @@ async def ncp_batch(
     # The whole batch shares one result budget, split evenly across the calls.
     item_chars = max(MIN_ITEM_CHARS, MAX_RESULT_CHARS // len(calls))
     allowed_keys = {"service", "action", "params", "fields", "profile", "paginate"}
+    # Read the config once so every item in the batch sees the same profiles.
+    try:
+        res = load_profiles()
+    except Exception as exc:  # noqa: BLE001 - keep the MCP server alive
+        return _unexpected(exc)
 
     async def one(http: httpx.AsyncClient, idx: int, item: Any) -> dict[str, Any]:
         try:
@@ -192,7 +199,7 @@ async def ncp_batch(
             paginate = item.get("paginate", True)
             if not isinstance(paginate, bool):
                 raise CallError("paginate must be true or false (JSON boolean, not a string)")
-            p = _pick(item_profile)
+            p = _pick(item_profile, res)
             async with sem:
                 r = await call(
                     http, p, item["service"], item["action"], "GET",
