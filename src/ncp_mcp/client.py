@@ -335,7 +335,8 @@ async def call(
 
     path = _build_path(base, action)
     rel = path[len(base.rstrip("/")):]
-    read_only = guard.is_read_only(method, rel, endpoints.is_shared(profile.zone, service))
+    shared = endpoints.is_shared(profile.zone, service)
+    read_only = guard.is_read_only(method, rel, shared)
     sensitive = guard.is_sensitive(rel)
     if mode == "read" and sensitive:
         raise CallError(
@@ -357,10 +358,10 @@ async def call(
             raise CallError(f"{method} {path} is read-only; use ncp_call instead.")
         if not guard.write_allowed():
             raise CallError("writes are disabled (start the server with NCP_ALLOW_WRITE=true).")
-        if not guard.write_permitted(method, service, action):
+        if not guard.write_permitted(method, service, action, shared):
             entry = guard.write_key(method, service, action)
-            if method == "GET":
-                entry = entry.removeprefix("GET ")
+            if method == "GET" or (shared and method == "POST"):
+                entry = entry.split(" ", 1)[1]  # GET/POST on the shared gateway: no method needed
             raise CallError(
                 f"blocked: '{entry}' is not in NCP_WRITE_ALLOWLIST. Each write action must be "
                 "allowed explicitly, with its HTTP method unless it is GET "

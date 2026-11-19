@@ -230,7 +230,8 @@ async def ncp_write(
     Args:
         service: Ncloud service key (see ncp_call).
         action: e.g. 'stopServerInstances', 'deletePublicIpInstance', or a REST path.
-        method: HTTP method. Shared-gateway actions accept GET; REST services use POST/PUT/DELETE.
+        method: HTTP method. Shared-gateway actions take GET or POST (same call);
+            REST services use POST/PUT/PATCH/DELETE as documented per API.
         params: Query parameters (lists become name.1, name.2).
         body: JSON body for REST-style services.
         profile: Credential profile. Required when more than one profile exists.

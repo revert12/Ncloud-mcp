@@ -329,8 +329,13 @@ def test_non_list_result_is_cut_as_text():
 # ---- write allowlist methods --------------------------------------------------------
 
 @pytest.mark.parametrize("allow,method,action,ok", [
+    # shared gateway: GET and POST are the same call, either entry form allows both
     ("vserver:stopServerInstances", "GET", "stopServerInstances", True),
-    ("vserver:stopServerInstances", "POST", "stopServerInstances", False),
+    ("vserver:stopServerInstances", "POST", "stopServerInstances", True),
+    ("POST vserver:stopServerInstances", "GET", "stopServerInstances", True),
+    ("vserver:stopServerInstances", "DELETE", "stopServerInstances", False),
+    ("vserver:stopServerInstances", "POST", "startServerInstances", False),
+    # REST services: methods are distinct
     ("POST subaccount:/sub-accounts", "POST", "/sub-accounts", True),
     ("POST subaccount:/sub-accounts", "POST", "sub-accounts", True),
     ("post subaccount:sub-accounts", "POST", "/sub-accounts", True),
@@ -347,6 +352,18 @@ def test_write_allowlist_matches_method(monkeypatch, allow, method, action, ok):
     else:
         with pytest.raises(CallError, match="NCP_WRITE_ALLOWLIST"):
             run(ok_handler, service=service, action=action, method=method, mode="write")
+
+
+def test_shared_post_read_goes_to_ncp_call(monkeypatch):
+    monkeypatch.setenv("NCP_ALLOW_WRITE", "true")
+    with pytest.raises(CallError, match="use ncp_call"):
+        run(ok_handler, service="vserver", action="getServerInstanceList", method="POST", mode="write")
+
+
+def test_shared_block_message_suggests_entry_without_method(monkeypatch):
+    monkeypatch.setenv("NCP_ALLOW_WRITE", "true")
+    with pytest.raises(CallError, match="'vserver:/stopServerInstances'"):
+        run(ok_handler, service="vserver", action="stopServerInstances", method="POST", mode="write")
 
 
 # ---- batch isolation (server layer) -------------------------------------------------

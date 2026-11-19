@@ -48,10 +48,11 @@ ncp_batch(calls=[
 - Writes are possible only through `ncp_write`, which appears only when the server runs with
   `NCP_ALLOW_WRITE=true`. Each action must also be listed in `NCP_WRITE_ALLOWLIST` (comma separated).
   Write requests are never retried.
-  - An entry without a method allows **GET only**. Shared-gateway write actions use GET, so
-    `vserver:stopServerInstances` is enough.
+  - For shared-gateway services, write `vserver:stopServerInstances`. The shared gateway takes
+    GET and POST as the same call, so both are allowed.
   - For REST-style services, put the method first: `POST subaccount:/sub-accounts`,
-    `DELETE subaccount:/sub-accounts/123`. Allowing POST on a path does not allow DELETE on it.
+    `DELETE subaccount:/sub-accounts/123`. An entry without a method allows GET only,
+    and allowing POST on a path does not allow DELETE on it.
   - If you used an entry like `subaccount:/sub-accounts` for POST with 0.5.x or earlier, add the method.
 - Callable services are limited to a per-zone allowlist (`src/ncp_mcp/endpoints.py`, based on the official
   NCP API docs). To use a service that is not listed, add it explicitly, e.g. `NCP_MCP_EXTRA_SERVICES="gov:cdn"`.
@@ -132,8 +133,9 @@ The Ncloud CLI can use the same profiles with `--profile <name>`.
 ```sh
 uv sync
 uv run pytest
-git config core.hooksPath .githooks   # gitleaks secret scan before each commit
 ```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, the pre-commit secret scan, and how the read-only guard is verified.
 
 ## License
 
