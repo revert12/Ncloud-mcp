@@ -1,6 +1,6 @@
 [project]
 name = "ncp-mcp"
-version = "0.2.0"
+version = "0.3.0"
 description = "Lightweight MCP server for NAVER Cloud Platform: one signed generic API call tool instead of one tool per API."
 readme = "README.md"
 license = "MIT"

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from mcp.server.mcpserver import MCPServer
@@ -12,7 +12,7 @@ from mcp.types import ToolAnnotations
 
 from . import __version__, guard
 from .client import TIMEOUT, CallError, call
-from .config import Profile, default_profile_name, load_profiles
+from .config import Profile, load_profiles
 
 MAX_BATCH = 50
 BATCH_CONCURRENCY = 5
@@ -20,12 +20,21 @@ BATCH_CONCURRENCY = 5
 READ_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=True)
 WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=True, open_world_hint=True)
 
+# Valid profile names are fixed into the tool schema at startup (restart to pick up changes).
+_STARTUP = load_profiles()
+PROFILE_NAMES: tuple[str, ...] = tuple(sorted(_STARTUP.profiles))
+ProfileName = Literal[PROFILE_NAMES] if PROFILE_NAMES else str  # type: ignore[valid-type]
+
+_profiles_hint = ", ".join(PROFILE_NAMES) if PROFILE_NAMES else "(none configured)"
 mcp = MCPServer(
     "ncp-mcp",
     version=__version__,
     instructions=(
         "NAVER Cloud Platform (Ncloud) API access through signed generic calls. "
-        "Call ncp_profiles first to see available credential profiles and zones. "
+        f"Credential profiles (name ends with its zone pub/gov/fin): {_profiles_hint}. "
+        "When more than one profile exists, every call must name its profile; pick the one that "
+        "matches the account the user is asking about and ask the user if unsure. "
+        "ncp_profiles(verify=true) shows which NCP account/user each key really belongs to. "
         "Shared-gateway services use https://ncloud.apigw.<zone>/<service>/v2/<action> "
         "(e.g. service='vserver', action='getServerInstanceList'); responseFormatType=json "
         "is added automatically. List parameters are passed as JSON arrays and are "
@@ -37,15 +46,26 @@ mcp = MCPServer(
 
 
 def _pick(profile: str | None) -> Profile:
-    profiles = load_profiles()
-    if not profiles:
+    res = load_profiles()
+    usable = res.profiles
+    if profile:
+        if profile in usable:
+            return usable[profile]
+        bad = next((p for p in res.problems if p["name"] == profile), None)
+        if bad:
+            raise CallError(f"profile '{profile}' is disabled: {bad['error']}")
+        raise CallError(f"unknown profile '{profile}'. available: {sorted(usable)}")
+    if len(usable) == 1:
+        return next(iter(usable.values()))
+    if not usable:
+        detail = f" problems: {res.problems}" if res.problems else ""
         raise CallError(
-            "no credentials: create ~/.ncloud/configure or set NCLOUD_ACCESS_KEY/NCLOUD_SECRET_KEY"
+            "no usable credential profile (see ncp_profiles). Configure ~/.ncloud/configure "
+            "or NCLOUD_ACCESS_KEY/NCLOUD_SECRET_KEY/NCLOUD_ZONE." + detail
         )
-    name = profile or default_profile_name(profiles)
-    if name not in profiles:
-        raise CallError(f"unknown profile '{name}'. available: {sorted(profiles)}")
-    return profiles[name]
+    raise CallError(
+        f"profile is required when several profiles exist. available: {sorted(usable)}"
+    )
 
 
 async def _run(profile: str | None, **kwargs: Any) -> dict[str, Any]:
@@ -58,15 +78,39 @@ async def _run(profile: str | None, **kwargs: Any) -> dict[str, Any]:
 
 
 @mcp.tool(annotations=READ_ONLY)
-def ncp_profiles() -> dict[str, Any]:
-    """List credential profiles (secrets are never returned), the default profile and whether writes are enabled."""
-    profiles = load_profiles()
-    return {
+async def ncp_profiles(verify: bool = False) -> dict[str, Any]:
+    """List usable credential profiles, disabled profiles with the reason, and whether writes are enabled.
+
+    Secrets are never returned. With verify=true, each usable profile is checked against
+    NCP STS (GET /api/v1/caller-identity) and the key owner's account id, login alias and
+    user type (Customer = main account, Sub = sub account, Role) are shown.
+    """
+    res = load_profiles()
+    out: dict[str, Any] = {
         "version": __version__,
-        "default": default_profile_name(profiles),
         "write_allowed": guard.write_allowed(),
-        "profiles": [p.public_view() for p in profiles.values()],
+        "profiles": [p.public_view() for p in res.profiles.values()],
+        "disabled": res.problems,
     }
+    if set(res.profiles) != set(PROFILE_NAMES):
+        out["note"] = "profiles changed since startup; restart the MCP server to refresh the tool schema"
+    if verify and res.profiles:
+        async with httpx.AsyncClient(timeout=TIMEOUT) as http:
+
+            async def who(p: Profile) -> dict[str, Any]:
+                try:
+                    r = await call(http, p, "sts", "/caller-identity", paginate=False)
+                except CallError as exc:
+                    return {"error": str(exc)}
+                if r["status"] >= 400:
+                    return {"error": {"status": r["status"], "body": r.get("error")}}
+                d = r["data"] if isinstance(r["data"], dict) else {}
+                return {k: d.get(k) for k in ("id", "loginAlias", "userType")}
+
+            ids = await asyncio.gather(*(who(p) for p in res.profiles.values()))
+        for view, ident in zip(out["profiles"], ids):
+            view["identity"] = ident
+    return out
 
 
 @mcp.tool(annotations=READ_ONLY)
@@ -75,7 +119,7 @@ async def ncp_call(
     action: str,
     params: dict[str, Any] | None = None,
     fields: list[str] | None = None,
-    profile: str | None = None,
+    profile: ProfileName | None = None,
     paginate: bool = True,
 ) -> dict[str, Any]:
     """Call one read-only Ncloud API (get*/list*/describe*/... or REST GET) with request signing.
@@ -87,7 +131,7 @@ async def ncp_call(
         params: Query parameters. Lists become name.1, name.2; dicts become name.key.
         fields: Keep only these keys in each list item (dot paths allowed,
             e.g. ['serverName', 'serverInstanceStatus.code']).
-        profile: Credential profile name from ncp_profiles (default profile if omitted).
+        profile: Credential profile. Required when more than one profile exists.
         paginate: Follow pageNo until totalRows is reached for list actions.
     """
     return await _run(
@@ -97,7 +141,9 @@ async def ncp_call(
 
 
 @mcp.tool(annotations=READ_ONLY)
-async def ncp_batch(calls: list[dict[str, Any]], profile: str | None = None) -> dict[str, Any]:
+async def ncp_batch(
+    calls: list[dict[str, Any]], profile: ProfileName | None = None
+) -> dict[str, Any]:
     """Run several read-only ncp_call requests concurrently; results keep the input order.
 
     Each item takes the ncp_call keys: service, action, and optionally params, fields,
@@ -136,7 +182,7 @@ async def ncp_write(
     method: str = "GET",
     params: dict[str, Any] | None = None,
     body: Any = None,
-    profile: str | None = None,
+    profile: ProfileName | None = None,
 ) -> dict[str, Any]:
     """Call one Ncloud API that creates, changes or deletes resources.
 
@@ -149,7 +195,7 @@ async def ncp_write(
         method: HTTP method. Shared-gateway actions accept GET; REST services use POST/PUT/DELETE.
         params: Query parameters (lists become name.1, name.2).
         body: JSON body for REST-style services.
-        profile: Credential profile name from ncp_profiles.
+        profile: Credential profile. Required when more than one profile exists.
     """
     return await _run(
         profile, service=service, action=action, method=method, params=params,

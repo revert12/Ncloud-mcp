@@ -12,7 +12,7 @@ API마다 도구를 하나씩 만들지 않고, **서명된 범용 호출 도구
 
 | 도구 | 설명 |
 |---|---|
-| `ncp_profiles` | 사용 가능한 자격증명 프로필·존·기본 프로필·쓰기 허용 여부 (비밀값은 반환하지 않음) |
+| `ncp_profiles` | 사용 가능한 프로필·존, 규칙에 어긋나 꺼진 프로필과 이유, 쓰기 허용 여부. `verify=true`면 키 주인(계정 ID·로그인 별칭·메인/서브) 확인 (비밀값은 반환하지 않음) |
 | `ncp_call` | **조회 전용** API 1건 호출. 서명, `responseFormatType=json`, 목록 파라미터 펼치기, 페이지 자동 넘김, `fields`로 필요한 필드만 반환 |
 | `ncp_batch` | 조회 여러 건을 동시에 실행(최대 50건, 동시 5건). 항목별 실패는 다른 항목에 영향 없음 |
 | `ncp_write` | 생성·변경·삭제 API 호출. **`NCP_ALLOW_WRITE=true`로 실행했을 때만 등록됨** |
@@ -67,20 +67,28 @@ Python 3.10 이상, [uv](https://docs.astral.sh/uv/) 필요.
 Ncloud CLI와 같은 파일 `~/.ncloud/configure`(INI)를 읽습니다. 섹션 하나가 프로필 하나입니다.
 
 ```ini
-[DEFAULT]
+[mycompany-pub]
 ncloud_access_key_id = <access key>
 ncloud_secret_access_key = <secret key>
-ncloud_api_url = https://ncloud.apigw.ntruss.com
+ncloud_zone = pub
 
-[gov]
+[customer-a-gov]
 ncloud_access_key_id = <gov access key>
 ncloud_secret_access_key = <gov secret key>
 ncloud_zone = gov
 ```
 
-- `ncloud_zone`: `pub`(기본) · `gov` · `fin`. 없으면 `ncloud_api_url`의 도메인으로 추정합니다.
-- 환경변수 `NCLOUD_ACCESS_KEY`·`NCLOUD_SECRET_KEY`(+ `NCLOUD_ZONE`)를 주면 `env` 프로필이 추가됩니다.
-- `NCP_MCP_CONFIG`로 설정 파일 위치를, `NCP_MCP_DEFAULT_PROFILE`로 기본 프로필을 바꿀 수 있습니다.
+**프로필 규칙**(어긴 프로필은 사용하지 않고 `ncp_profiles`의 `disabled`에 이유를 보여 줍니다)
+- `ncloud_zone`(`pub` · `gov` · `fin`)을 반드시 적습니다.
+- 프로필 이름은 소문자·숫자·하이픈이고 **끝이 존과 같아야** 합니다(`-pub`, `-gov`, `-fin`). 이름만 봐도 존을 알 수 있게 하기 위해서입니다. 그래서 `[DEFAULT]`는 쓸 수 없습니다.
+- 프로필이 2개 이상이면 호출할 때마다 `profile`을 지정해야 합니다. 기본 프로필은 없습니다.
+- 사용 가능한 프로필 이름은 서버 시작 시 도구 정의에 선택 목록으로 들어갑니다. 프로필을 바꾸면 MCP 서버를 다시 시작하세요.
+- `ncp_profiles(verify=true)`는 각 키가 실제로 어느 NCP 계정·사용자의 키인지 STS(`caller-identity`)로 확인해 보여 줍니다.
+
+Ncloud CLI는 `--profile <이름>`으로 같은 프로필을 쓸 수 있습니다.
+
+- 환경변수 `NCLOUD_ACCESS_KEY`·`NCLOUD_SECRET_KEY`·`NCLOUD_ZONE`을 주면 `env-<zone>` 프로필이 추가됩니다.
+- `NCP_MCP_CONFIG`로 설정 파일 위치를 바꿀 수 있습니다.
 
 ## 서비스 주소
 
@@ -89,18 +97,10 @@ ncloud_zone = gov
 | 기본(공용 게이트웨이) | `https://ncloud.apigw.<zone>/<service>/v2/<action>` |
 | `billing` | `https://billingapi.apigw.<zone>/billing/v1` |
 | `subaccount` | `https://subaccount.apigw.<zone>/api/v1` |
+| `sts` | `https://sts.apigw.<zone>/api/v1` |
 | `vnks`, `vses`, `vcdss`, `source*` 등 | `src/ncp_mcp/endpoints.py`의 `SPECIAL` 참고 |
 
 `<zone>`은 `ntruss.com`(민간) · `gov-ntruss.com`(공공) · `fin-ntruss.com`(금융)입니다.
-
-## 검증 상태
-
-| 항목 | 상태 |
-|---|---|
-| 민간(pub) 존 조회 | 실계정 확인 |
-| 공공(gov)·금융(fin) 존 | 미확인 (주소 규칙만 반영) |
-| 페이지 자동 넘김 | 미확인 (한 페이지를 넘는 목록으로 아직 시험 안 함) |
-| 쓰기 동작 | 미확인 |
 
 ## 개발
 

@@ -30,6 +30,7 @@ SHARED_HOST = {
 SPECIAL: dict[str, tuple[str, str]] = {
     "billing": ("billingapi", "/billing/v1"),
     "subaccount": ("subaccount", "/api/v1"),
+    "sts": ("sts", "/api/v1"),
     "vnks": ("nks", "/vnks/v2"),
     "vses": ("vpcsearchengine", "/api/v1"),
     "vses2": ("vpcsearchengine", "/api/v2"),
