@@ -65,6 +65,15 @@ def test_build_path_rejects_urls():
             _build_path("/vserver/v2", bad)
 
 
+def test_project_fields():
+    from ncp_mcp.client import project
+
+    items = [{"serverName": "a", "status": {"code": "RUN", "codeName": "x"}, "ip": "1"}]
+    assert project(items, ["serverName", "status.code", "missing"]) == [
+        {"serverName": "a", "status.code": "RUN", "missing": None}
+    ]
+
+
 def test_find_page():
     data = {"getXListResponse": {"totalRows": 3, "returnCode": "0", "xList": [1, 2]}}
     node, key, total = _find_page(data)
