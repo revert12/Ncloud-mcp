@@ -23,6 +23,10 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/ncp_mcp"]
 
+[tool.uv]
+# uv.lock uses the lockfile format of uv 0.13; older uv would rewrite it.
+required-version = ">=0.13"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
