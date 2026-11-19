@@ -247,15 +247,26 @@ async def call(
     service = service.strip().lower()
 
     path = _build_path(base, action)
-    read_only = guard.is_read_only(method, path)
+    rel = path[len(base.rstrip("/")):]
+    read_only = guard.is_read_only(method, rel, endpoints.is_shared(profile.zone, service))
+    sensitive = guard.is_sensitive(rel)
+    if mode == "read" and sensitive:
+        raise CallError(
+            f"blocked: {method} {path} returns credentials (password/kubeconfig) and is not "
+            "available in ncp_call/ncp_batch. If really needed, call it with ncp_write after "
+            f"adding '{service}:{action.strip()}' to NCP_WRITE_ALLOWLIST."
+        )
     if mode == "read" and not read_only:
         raise CallError(
             f"blocked: {method} {path} is classified as a write operation. "
-            "ncp_call/ncp_batch are read-only; use ncp_write (available only when the "
-            "server runs with NCP_ALLOW_WRITE=true)."
+            "ncp_call/ncp_batch only accept GET actions proven read-only: on shared-gateway "
+            "services a single camelCase name starting with a read verb "
+            f"({', '.join(sorted(guard.READ_VERBS))}), e.g. 'getServerInstanceList'. "
+            "Writes go through ncp_write (available only when the server runs with "
+            "NCP_ALLOW_WRITE=true)."
         )
     if mode == "write":
-        if read_only:
+        if read_only and not sensitive:
             raise CallError(f"{method} {path} is read-only; use ncp_call instead.")
         if not guard.write_allowed():
             raise CallError("writes are disabled (start the server with NCP_ALLOW_WRITE=true).")

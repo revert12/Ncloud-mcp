@@ -221,6 +221,40 @@ def test_read_mode_blocks_write_actions():
         run(handler, service="vserver", action="terminateServerInstances")
 
 
+@pytest.mark.parametrize(
+    "action",
+    ["terminateserverinstances", "TerminateServerInstances", "terminateServerInstances/x",
+     "getServerInstanceList/terminate"],
+)
+def test_read_mode_blocks_unproven_shared_actions(action):
+    def handler(req):
+        raise AssertionError("must not send")
+
+    with pytest.raises(CallError, match="write operation"):
+        run(handler, service="vserver", action=action)
+
+
+@pytest.mark.parametrize(
+    "service,action",
+    [("vserver", "getRootPassword"), ("vserver", "getRootPasswordServerInstanceList"),
+     ("vnks", "/clusters/abc/kubeconfig")],
+)
+def test_read_mode_blocks_sensitive_actions(service, action):
+    def handler(req):
+        raise AssertionError("must not send")
+
+    with pytest.raises(CallError, match="credentials"):
+        run(handler, service=service, action=action)
+
+
+def test_sensitive_action_allowed_only_via_write_allowlist(monkeypatch):
+    monkeypatch.setenv("NCP_ALLOW_WRITE", "true")
+    with pytest.raises(CallError, match="NCP_WRITE_ALLOWLIST"):
+        run(ok_handler, service="vserver", action="getRootPassword", mode="write")
+    monkeypatch.setenv("NCP_WRITE_ALLOWLIST", "vserver:getRootPassword")
+    assert run(ok_handler, service="vserver", action="getRootPassword", mode="write")["status"] == 200
+
+
 # ---- input validation ---------------------------------------------------------------
 
 @pytest.mark.parametrize("kw", [

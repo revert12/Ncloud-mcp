@@ -13,20 +13,49 @@ def test_signature_is_deterministic():
 
 
 @pytest.mark.parametrize(
-    "method,path,expected",
+    "method,action,shared,expected",
     [
-        ("GET", "/vserver/v2/getServerInstanceList", True),
-        ("GET", "/vserver/v2/terminateServerInstances", False),
-        ("GET", "/vserver/v2/stopServerInstances", False),
-        ("GET", "/vpc/v2/deleteNatGatewayInstance", False),
-        ("GET", "/api/v1/sub-accounts", True),
-        ("POST", "/api/v1/sub-accounts", False),
-        ("DELETE", "/api/v1/sub-accounts/123", False),
-        ("GET", "/billing/v1/cost/getDemandCostList", True),
+        # shared gateway: only a single read-verb camelCase segment is read-only
+        ("GET", "/getServerInstanceList", True, True),
+        ("GET", "getServerInstanceList/", True, True),
+        ("GET", "/terminateServerInstances", True, False),
+        ("GET", "/stopServerInstances", True, False),
+        ("GET", "/deleteNatGatewayInstance", True, False),
+        ("GET", "/terminateserverinstances", True, False),
+        ("GET", "/TerminateServerInstances", True, False),
+        ("GET", "/GetServerInstanceList", True, False),
+        ("GET", "/terminateServerInstances/x", True, False),
+        ("GET", "/getServerInstanceList/x", True, False),
+        ("GET", "/get", True, False),
+        ("GET", "/", True, False),
+        ("POST", "/getServerInstanceList", True, False),
+        # REST-style services
+        ("GET", "/sub-accounts", False, True),
+        ("GET", "/sub-accounts/123", False, True),
+        ("POST", "/sub-accounts", False, False),
+        ("DELETE", "/sub-accounts/123", False, False),
+        ("GET", "/cost/getDemandCostList", False, True),
+        ("GET", "/cost/deleteDemandCostList", False, False),
+        ("GET", "/deleteX/sub-accounts", False, False),
     ],
 )
-def test_read_only(method, path, expected):
-    assert guard.is_read_only(method, path) is expected
+def test_read_only(method, action, shared, expected):
+    assert guard.is_read_only(method, action, shared) is expected
+
+
+@pytest.mark.parametrize(
+    "action,expected",
+    [
+        ("/getRootPassword", True),
+        ("/getrootpassword", True),
+        ("/getRootPasswordServerInstanceList", True),
+        ("/clusters/abc-123/kubeconfig", True),
+        ("/getServerInstanceList", False),
+        ("/clusters/abc-123", False),
+    ],
+)
+def test_sensitive(action, expected):
+    assert guard.is_sensitive(action) is expected
 
 
 def test_flatten_params():
