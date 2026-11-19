@@ -14,9 +14,9 @@ from . import __version__, guard
 from .client import MAX_RESULT_CHARS, TIMEOUT, CallError, call
 from .config import LoadResult, Profile, load_profiles
 
-MAX_BATCH = 50
-BATCH_CONCURRENCY = 5
-MIN_ITEM_CHARS = 5_000  # floor per batch item, so a 50-call batch still says something useful
+MAX_CALLS = 50
+CONCURRENCY = 5
+MIN_ITEM_CHARS = 5_000  # floor per call, so a 50-call request still says something useful
 
 READ_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=True)
 WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=True, open_world_hint=True)
@@ -28,7 +28,7 @@ ProfileName = Literal[PROFILE_NAMES] if PROFILE_NAMES else str  # type: ignore[v
 
 _profiles_hint = ", ".join(PROFILE_NAMES) if PROFILE_NAMES else "(none configured)"
 mcp = MCPServer(
-    "ncp-mcp",
+    "ncloud-mcp-server",
     version=__version__,
     instructions=(
         "NAVER Cloud Platform (Ncloud) API access through signed generic calls. "
@@ -39,7 +39,7 @@ mcp = MCPServer(
         "Shared-gateway services use https://ncloud.apigw.<zone>/<service>/v2/<action> "
         "(e.g. service='vserver', action='getServerInstanceList'); responseFormatType=json "
         "is added automatically. List parameters are passed as JSON arrays and are "
-        "expanded to name.1, name.2. ncp_call and ncp_batch are read-only. "
+        "expanded to name.1, name.2. ncp_read runs 1-50 read-only calls at once. "
         "ncp_write exists only when the server is started with NCP_ALLOW_WRITE=true. "
         "Use 'fields' to keep only the columns you need from large list responses."
     ),
@@ -47,7 +47,7 @@ mcp = MCPServer(
 
 
 def _pick(profile: str | None, res: LoadResult | None = None) -> Profile:
-    """Resolve a profile. Pass ``res`` to reuse one config read (ncp_batch does)."""
+    """Resolve a profile. Pass ``res`` to reuse one config read (ncp_read does)."""
     if res is None:
         res = load_profiles()
     usable = res.profiles
@@ -132,55 +132,43 @@ async def ncp_profiles(verify: bool = False) -> dict[str, Any]:
 
 
 @mcp.tool(annotations=READ_ONLY)
-async def ncp_call(
-    service: str,
-    action: str,
-    params: dict[str, Any] | None = None,
-    fields: list[str] | None = None,
-    profile: ProfileName | None = None,
-    paginate: bool = True,
+async def ncp_read(
+    calls: list[dict[str, Any]], profile: ProfileName | None = None
 ) -> dict[str, Any]:
-    """Call one read-only Ncloud API (get*/list*/describe*/... or REST GET) with request signing.
+    """Run 1 to 50 read-only Ncloud API calls (get*/list*/describe*/... or REST GET) with request signing.
 
-    Args:
+    Calls run concurrently (5 at a time) and results keep the input order. Failures are
+    reported per item and do not stop the others.
+
+    Each item of 'calls' takes:
         service: Allowlisted Ncloud service key, e.g. 'vserver', 'vpc', 'vloadbalancer',
             'vpostgresql', 'billing', 'subaccount'. The allowlist depends on the profile's zone;
             a rejected call lists the allowed services.
         action: Path under the service base, e.g. 'getServerInstanceList' or '/sub-accounts'.
-        params: Query parameters. Lists become name.1, name.2; dicts become name.key.
+        params (optional): Query parameters. Lists become name.1, name.2; dicts become name.key.
             Do not pass pageNo/page unless you want one specific page.
-        fields: Keep only these keys in each list item (dot paths allowed,
+        fields (optional): Keep only these keys in each list item (dot paths allowed,
             e.g. ['serverName', 'serverInstanceStatus.code']).
-        profile: Credential profile. Required when more than one profile exists.
-        paginate: Fetch every page when the first response is incomplete.
-            The result's 'paging.complete' says whether the list is complete.
-    """
-    return await _run(
-        profile, service=service, action=action, method="GET", params=params,
-        paginate=paginate, fields=fields, mode="read",
-    )
+        paginate (optional, default true): Fetch every page when the first response is
+            incomplete. The result's 'paging.complete' says whether the list is complete.
+        profile (optional): Overrides the top-level profile for this item.
 
-
-@mcp.tool(annotations=READ_ONLY)
-async def ncp_batch(
-    calls: list[dict[str, Any]], profile: ProfileName | None = None
-) -> dict[str, Any]:
-    """Run several read-only ncp_call requests concurrently; results keep the input order.
-
-    Each item takes the ncp_call keys: service, action, and optionally params, fields,
-    profile, paginate. A per-item 'profile' overrides the batch profile.
-    Failures are reported per item and do not stop the others.
+    Args:
+        calls: The calls to run, e.g.
+            [{"service": "vserver", "action": "getServerInstanceList", "params": {"regionCode": "KR"}}].
+        profile: Credential profile for every call. Required when more than one profile exists,
+            unless each item names its own.
     """
     if not isinstance(calls, list) or not calls:
         return {"error": "calls must be a non-empty list"}
-    if len(calls) > MAX_BATCH:
-        return {"error": f"at most {MAX_BATCH} calls per batch"}
+    if len(calls) > MAX_CALLS:
+        return {"error": f"at most {MAX_CALLS} calls per request"}
 
-    sem = asyncio.Semaphore(BATCH_CONCURRENCY)
-    # The whole batch shares one result budget, split evenly across the calls.
+    sem = asyncio.Semaphore(CONCURRENCY)
+    # All calls share one result budget, split evenly; a single call gets all of it.
     item_chars = max(MIN_ITEM_CHARS, MAX_RESULT_CHARS // len(calls))
     allowed_keys = {"service", "action", "params", "fields", "profile", "paginate"}
-    # Read the config once so every item in the batch sees the same profiles.
+    # Read the config once so every call in the request sees the same profiles.
     try:
         res = load_profiles()
     except Exception as exc:  # noqa: BLE001 - keep the MCP server alive
@@ -192,7 +180,7 @@ async def ncp_batch(
                 raise CallError("each call needs 'service' and 'action'")
             unknown = set(item) - allowed_keys
             if unknown:
-                raise CallError(f"unknown keys {sorted(unknown)} (read-only batch; no method/body)")
+                raise CallError(f"unknown keys {sorted(unknown)} (ncp_read is read-only; no method/body)")
             item_profile = item.get("profile") or profile
             if item_profile is not None and not isinstance(item_profile, str):
                 raise CallError("profile must be a string")
@@ -208,7 +196,7 @@ async def ncp_batch(
                 )
         except CallError as exc:
             r = {"error": str(exc)}
-        except Exception as exc:  # noqa: BLE001 - one bad item must not fail the batch
+        except Exception as exc:  # noqa: BLE001 - one bad item must not fail the others
             r = _unexpected(exc)
         return {"index": idx, **r}
 
@@ -231,11 +219,11 @@ async def ncp_write(
     Only registered when the server runs with NCP_ALLOW_WRITE=true, and each call must
     match an NCP_WRITE_ALLOWLIST entry: 'service:action' for GET, or
     'METHOD service:action' for other methods. Read-only actions are
-    rejected here; use ncp_call for those. Writes are never retried: on a timeout the
+    rejected here; use ncp_read for those. Writes are never retried: on a timeout the
     outcome is unknown, so check the resource state before trying again.
 
     Args:
-        service: Ncloud service key (see ncp_call).
+        service: Ncloud service key (see ncp_read).
         action: e.g. 'stopServerInstances', 'deletePublicIpInstance', or a REST path.
         method: HTTP method. Shared-gateway actions take GET or POST (same call);
             REST services use POST/PUT/PATCH/DELETE as documented per API.

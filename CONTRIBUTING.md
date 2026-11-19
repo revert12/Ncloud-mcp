@@ -19,7 +19,7 @@ CI runs gitleaks and `uv sync --locked` too, so a stale `uv.lock` fails the buil
 
 ## Read-only guard: how it is verified
 
-`ncp_call` / `ncp_batch` must never change anything, so `src/ncp_mcp/guard.py` only lets
+`ncp_read` must never change anything, so `src/ncp_mcp/guard.py` only lets
 through actions that are **proven** read-only. Read its module docstring first; in short:
 
 - Shared-gateway services (`/<service>/v2/<action>`): a read is one camelCase segment
@@ -76,8 +76,15 @@ Checked against the API docs. When one of them turns out to be wrong, fix the co
 ## Releases
 
 Bump the version in both `pyproject.toml` and `src/ncp_mcp/__init__.py`, run `uv lock`,
-and update the install tag in `README.md` and `README.en.md`. After the PR is merged,
-the `tag-release` workflow tags `main` as `v<version>`.
+update the install tag in `README.md` and `README.ko.md`, and move the `[Unreleased]` entries
+of `CHANGELOG.md` under the new version with its date (mark changes that need a configuration
+change as **Breaking**). After the PR is merged,
+the `tag-release` workflow (`.github/workflows/tag.yml`) tags `main` as `v<version>`,
+runs the tests again, builds the package and publishes it to PyPI as `ncloud-mcp-server`.
+Publishing uses PyPI Trusted Publishing (no API token): PyPI trusts repository
+`revert12/ncloud-mcp-server`, workflow `tag.yml`. If you rename the repository or the
+workflow file, update the publisher on PyPI first. A version number can be uploaded only
+once, even after deleting it, so a broken release is fixed with a new version.
 
 Use a new minor version (0.x → 0.(x+1)) when users must change their configuration,
 for example the format of `NCP_WRITE_ALLOWLIST`.

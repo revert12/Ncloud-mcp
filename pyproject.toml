@@ -1,6 +1,6 @@
 [project]
-name = "ncp-mcp"
-version = "0.6.0"
+name = "ncloud-mcp-server"
+version = "0.7.0"
 description = "Lightweight MCP server for NAVER Cloud Platform (Ncloud): a few signed generic tools instead of one tool per API."
 readme = "README.md"
 license = "MIT"
@@ -11,7 +11,7 @@ dependencies = [
 ]
 
 [project.scripts]
-ncp-mcp = "ncp_mcp.server:main"
+ncloud-mcp-server = "ncp_mcp.server:main"
 
 [dependency-groups]
 dev = ["pytest>=8"]

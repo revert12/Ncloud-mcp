@@ -354,9 +354,9 @@ def test_write_allowlist_matches_method(monkeypatch, allow, method, action, ok):
             run(ok_handler, service=service, action=action, method=method, mode="write")
 
 
-def test_shared_post_read_goes_to_ncp_call(monkeypatch):
+def test_shared_post_read_goes_to_ncp_read(monkeypatch):
     monkeypatch.setenv("NCP_ALLOW_WRITE", "true")
-    with pytest.raises(CallError, match="use ncp_call"):
+    with pytest.raises(CallError, match="use ncp_read"):
         run(ok_handler, service="vserver", action="getServerInstanceList", method="POST", mode="write")
 
 
@@ -366,9 +366,9 @@ def test_shared_block_message_suggests_entry_without_method(monkeypatch):
         run(ok_handler, service="vserver", action="stopServerInstances", method="POST", mode="write")
 
 
-# ---- batch isolation (server layer) -------------------------------------------------
+# ---- ncp_read (server layer) -------------------------------------------------
 
-def test_batch_isolates_failures(monkeypatch, tmp_path):
+def test_read_isolates_failures(monkeypatch, tmp_path):
     cfg = tmp_path / "configure"
     cfg.write_text("[test-pub]\nncloud_access_key_id = AK\nncloud_secret_access_key = SK\n"
                    "ncloud_zone = pub\n", encoding="utf-8")
@@ -383,7 +383,7 @@ def test_batch_isolates_failures(monkeypatch, tmp_path):
         return httpx.Response(200, json={"getRegionListResponse": {"totalRows": 0, "regionList": []}})
 
     monkeypatch.setattr(server, "_http", lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)))
-    out = asyncio.run(server.ncp_batch([
+    out = asyncio.run(server.ncp_read([
         {"service": "vserver", "action": "getRegionList"},
         "not-a-dict",
         {"service": "vserver", "action": "getRegionList", "params": "bad"},
@@ -401,7 +401,7 @@ def test_batch_isolates_failures(monkeypatch, tmp_path):
     assert json.dumps(out).find("SK") == -1
 
 
-def test_batch_reads_config_once(monkeypatch, tmp_path):
+def test_read_reads_config_once(monkeypatch, tmp_path):
     cfg = tmp_path / "configure"
     cfg.write_text("[test-pub]\nncloud_access_key_id = AK\nncloud_secret_access_key = SK\n"
                    "ncloud_zone = pub\n", encoding="utf-8")
@@ -421,10 +421,55 @@ def test_batch_reads_config_once(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_http", lambda: httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json={"getRegionListResponse": {"totalRows": 0, "regionList": []}})
     )))
-    out = asyncio.run(server.ncp_batch(
+    out = asyncio.run(server.ncp_read(
         [{"service": "vserver", "action": "getRegionList"}] * 10
         + [{"service": "vserver", "action": "getRegionList", "profile": "nope-pub"}]
     ))
     assert len(reads) == 1
     assert out["count"] == 11 and out["failed"] == 1
     assert "unknown profile 'nope-pub'" in out["results"][10]["error"]
+
+
+def _one_profile(monkeypatch, tmp_path):
+    cfg = tmp_path / "configure"
+    cfg.write_text("[test-pub]\nncloud_access_key_id = AK\nncloud_secret_access_key = SK\n"
+                   "ncloud_zone = pub\n", encoding="utf-8")
+    monkeypatch.setenv("NCP_MCP_CONFIG", str(cfg))
+    for v in ("NCLOUD_ACCESS_KEY", "NCLOUD_SECRET_KEY", "NCLOUD_ZONE"):
+        monkeypatch.delenv(v, raising=False)
+
+
+def test_read_tools_are_merged():
+    from ncp_mcp import server
+
+    names = {t.name for t in asyncio.run(server.mcp.list_tools())}
+    assert {"ncp_profiles", "ncp_read"} <= names
+    assert not names & {"ncp_call", "ncp_batch"}
+
+
+def test_read_single_call_gets_whole_budget(monkeypatch, tmp_path):
+    _one_profile(monkeypatch, tmp_path)
+    from ncp_mcp import server
+
+    seen = []
+    real = server.call
+
+    async def spy(*args, **kwargs):
+        seen.append(kwargs["max_chars"])
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(server, "call", spy)
+    monkeypatch.setattr(server, "_http", lambda: httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda req: httpx.Response(200, json={"getRegionListResponse": {"totalRows": 0, "regionList": []}})
+    )))
+    one = asyncio.run(server.ncp_read([{"service": "vserver", "action": "getRegionList"}]))
+    assert one["count"] == 1 and one["failed"] == 0 and one["results"][0]["status"] == 200
+    assert seen == [server.MAX_RESULT_CHARS]
+
+
+def test_read_rejects_empty_and_too_many():
+    from ncp_mcp import server
+
+    assert "non-empty" in asyncio.run(server.ncp_read([]))["error"]
+    many = [{"service": "vserver", "action": "getRegionList"}] * (server.MAX_CALLS + 1)
+    assert "at most" in asyncio.run(server.ncp_read(many))["error"]

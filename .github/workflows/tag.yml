@@ -1,7 +1,11 @@
 name: tag-release
 
-# When main gets a version that has no tag yet, tag that commit as v<version>.
-# Versions are bumped only in release PRs, so ordinary merges do nothing here.
+# When main gets a version that has no tag yet, tag that commit as v<version> and
+# publish it to PyPI. Versions are bumped only in release PRs, so ordinary merges do nothing.
+#
+# Publishing lives in this file because a tag pushed with GITHUB_TOKEN does not start
+# other workflows. PyPI trusts this file by name (Trusted Publishing: no API token is
+# stored anywhere), so renaming it means updating the publisher on PyPI too.
 
 on:
   push:
@@ -13,6 +17,8 @@ permissions:
 jobs:
   tag:
     runs-on: ubuntu-latest
+    outputs:
+      created: ${{ steps.create.outputs.created }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -31,14 +37,35 @@ jobs:
           echo "tag=v$py_ver" >> "$GITHUB_OUTPUT"
 
       - name: Create tag if missing
+        id: create
         run: |
           tag="${{ steps.ver.outputs.tag }}"
           if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
             echo "$tag already exists ($(git rev-list -n1 "$tag")); nothing to do"
+            echo "created=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "$tag" -m "$tag" "$GITHUB_SHA"
           git push origin "$tag"
+          echo "created=true" >> "$GITHUB_OUTPUT"
           echo "created $tag at $GITHUB_SHA"
+
+  publish:
+    # Only for a version that was just tagged. If this job fails, use
+    # "Re-run failed jobs": the tag job's output is kept, so it publishes again.
+    needs: tag
+    if: needs.tag.outputs.created == 'true'
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write  # Trusted Publishing to PyPI
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.3  # no floating v10 tag since v8
+      - run: uv sync --locked
+      - run: uv run --frozen pytest -q
+      - run: uv build
+      - uses: pypa/gh-action-pypi-publish@release/v1

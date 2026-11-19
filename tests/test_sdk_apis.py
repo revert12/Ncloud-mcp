@@ -20,7 +20,7 @@ ROWS = [
 ]
 SHARED = set(endpoints._SHARED_V2["pub"])
 
-# REST services that change state over GET. ncp_call must block every one of these.
+# REST services that change state over GET. ncp_read must block every one of these.
 STATE_CHANGING_GETS = {
     ("vcdss", "/cluster/disableBrokerNodePublicEndpoint/{serviceGroupInstanceNo}"),
     ("vcdss", "/cluster/disablePublicDomain/{serviceGroupInstanceNo}"),
@@ -34,7 +34,7 @@ STATE_CHANGING_GETS = {
     ("vses2", "/cluster/restartCluster/{service-group-no}"),
 }
 
-# Reads that ncp_call blocks on purpose (callable through ncp_write + allowlist).
+# Reads that ncp_read blocks on purpose (callable through ncp_write + allowlist).
 BLOCKED_READS = {
     # 'download' is not a read verb: it would also open shared-gateway downloadDmsFile.
     ("vcdss", "/cluster/downloadCertificate/{serviceGroupInstanceNo}"),
@@ -69,7 +69,7 @@ def test_explicit_sets_still_exist_in_snapshot():
 
 def _classify(svc, method, path):
     shared = svc in SHARED
-    # ncp_call always sends GET; the shared gateway treats GET and POST the same.
+    # ncp_read always sends GET; the shared gateway treats GET and POST the same.
     sent = "GET" if shared else method.upper()
     return guard.is_read_only(sent, path, shared)
 
