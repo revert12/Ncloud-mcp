@@ -38,6 +38,10 @@ ncp_batch(calls=[
   REST 형식의 GET만 허용합니다. Ncloud의 공용 게이트웨이 API는 삭제 동작도 GET으로 받기 때문에
   HTTP 메서드가 아니라 **동작 이름**으로 판정합니다.
 - 변경은 `ncp_write`로만 할 수 있고, 이 도구는 서버를 `NCP_ALLOW_WRITE=true`로 실행했을 때만 나타납니다.
+  그리고 호출할 동작을 `NCP_WRITE_ALLOWLIST`에 하나씩 적어야 합니다(예: `vserver:stopServerInstances`). 변경 요청은 재시도하지 않습니다.
+- 호출할 수 있는 서비스는 존별 허용 목록(`src/ncp_mcp/endpoints.py`, NCP 공식 API 문서 기준)으로 제한합니다.
+  목록에 없는 서비스는 `NCP_MCP_EXTRA_SERVICES="gov:cdn"`처럼 직접 추가해야 합니다.
+- 조회 요청은 429·5xx·시간 초과 때 최대 2번 다시 시도하고(`NCP_MCP_RETRIES`), 동시 요청은 5개로 제한합니다(`NCP_MCP_CONCURRENCY`).
 - 도구마다 MCP 표준 표시(`readOnlyHint`/`destructiveHint`)를 붙였습니다. 클라이언트 권한 설정에서
   **`ncp_call`·`ncp_batch`는 허용, `ncp_write`는 매번 확인**으로 나눠 두는 것을 권장합니다.
   (Claude Code 예: `permissions.allow`에 `mcp__ncp__ncp_call`, `permissions.ask`에 `mcp__ncp__ncp_write`)

@@ -68,13 +68,26 @@ def _pick(profile: str | None) -> Profile:
     )
 
 
+def _http() -> httpx.AsyncClient:  # patched in tests
+    return httpx.AsyncClient(timeout=TIMEOUT)
+
+
+def _unexpected(exc: Exception) -> dict[str, Any]:
+    # Never echo request details: only the exception type.
+    return {"error": f"internal error ({type(exc).__name__}); the request was not completed"}
+
+
 async def _run(profile: str | None, **kwargs: Any) -> dict[str, Any]:
     try:
+        if profile is not None and not isinstance(profile, str):
+            raise CallError("profile must be a string")
         p = _pick(profile)
-        async with httpx.AsyncClient(timeout=TIMEOUT) as http:
+        async with _http() as http:
             return await call(http, p, **kwargs)
     except CallError as exc:
         return {"error": str(exc)}
+    except Exception as exc:  # noqa: BLE001 - keep the MCP server alive
+        return _unexpected(exc)
 
 
 @mcp.tool(annotations=READ_ONLY)
@@ -95,13 +108,15 @@ async def ncp_profiles(verify: bool = False) -> dict[str, Any]:
     if set(res.profiles) != set(PROFILE_NAMES):
         out["note"] = "profiles changed since startup; restart the MCP server to refresh the tool schema"
     if verify and res.profiles:
-        async with httpx.AsyncClient(timeout=TIMEOUT) as http:
+        async with _http() as http:
 
             async def who(p: Profile) -> dict[str, Any]:
                 try:
                     r = await call(http, p, "sts", "/caller-identity", paginate=False)
                 except CallError as exc:
                     return {"error": str(exc)}
+                except Exception as exc:  # noqa: BLE001
+                    return _unexpected(exc)
                 if r["status"] >= 400:
                     return {"error": {"status": r["status"], "body": r.get("error")}}
                 d = r["data"] if isinstance(r["data"], dict) else {}
@@ -125,14 +140,17 @@ async def ncp_call(
     """Call one read-only Ncloud API (get*/list*/describe*/... or REST GET) with request signing.
 
     Args:
-        service: Ncloud service key, e.g. 'vserver', 'vpc', 'vloadbalancer', 'vpostgresql',
-            'billing', 'subaccount'. Unknown names map to the shared gateway /<service>/v2.
+        service: Allowlisted Ncloud service key, e.g. 'vserver', 'vpc', 'vloadbalancer',
+            'vpostgresql', 'billing', 'subaccount'. The allowlist depends on the profile's zone;
+            a rejected call lists the allowed services.
         action: Path under the service base, e.g. 'getServerInstanceList' or '/sub-accounts'.
         params: Query parameters. Lists become name.1, name.2; dicts become name.key.
+            Do not pass pageNo/page unless you want one specific page.
         fields: Keep only these keys in each list item (dot paths allowed,
             e.g. ['serverName', 'serverInstanceStatus.code']).
         profile: Credential profile. Required when more than one profile exists.
-        paginate: Follow pageNo until totalRows is reached for list actions.
+        paginate: Fetch every page when the first response is incomplete.
+            The result's 'paging.complete' says whether the list is complete.
     """
     return await _run(
         profile, service=service, action=action, method="GET", params=params,
@@ -156,24 +174,35 @@ async def ncp_batch(
         return {"error": f"at most {MAX_BATCH} calls per batch"}
 
     sem = asyncio.Semaphore(BATCH_CONCURRENCY)
+    allowed_keys = {"service", "action", "params", "fields", "profile", "paginate"}
 
-    async def one(http: httpx.AsyncClient, item: dict[str, Any]) -> dict[str, Any]:
+    async def one(http: httpx.AsyncClient, idx: int, item: Any) -> dict[str, Any]:
         try:
             if not isinstance(item, dict) or "service" not in item or "action" not in item:
                 raise CallError("each call needs 'service' and 'action'")
-            p = _pick(item.get("profile") or profile)
+            unknown = set(item) - allowed_keys
+            if unknown:
+                raise CallError(f"unknown keys {sorted(unknown)} (read-only batch; no method/body)")
+            item_profile = item.get("profile") or profile
+            if item_profile is not None and not isinstance(item_profile, str):
+                raise CallError("profile must be a string")
+            p = _pick(item_profile)
             async with sem:
-                return await call(
+                r = await call(
                     http, p, item["service"], item["action"], "GET",
-                    item.get("params"), None, item.get("paginate", True),
+                    item.get("params"), None, bool(item.get("paginate", True)),
                     item.get("fields"), "read",
                 )
         except CallError as exc:
-            return {"error": str(exc)}
+            r = {"error": str(exc)}
+        except Exception as exc:  # noqa: BLE001 - one bad item must not fail the batch
+            r = _unexpected(exc)
+        return {"index": idx, **r}
 
-    async with httpx.AsyncClient(timeout=TIMEOUT) as http:
-        results = await asyncio.gather(*(one(http, c) for c in calls))
-    return {"count": len(results), "results": list(results)}
+    async with _http() as http:
+        results = await asyncio.gather(*(one(http, i, c) for i, c in enumerate(calls)))
+    failed = sum(1 for r in results if "error" in r)
+    return {"count": len(results), "failed": failed, "results": list(results)}
 
 
 async def ncp_write(
@@ -186,8 +215,10 @@ async def ncp_write(
 ) -> dict[str, Any]:
     """Call one Ncloud API that creates, changes or deletes resources.
 
-    Only registered when the server runs with NCP_ALLOW_WRITE=true. Read-only actions
-    are rejected here; use ncp_call for those.
+    Only registered when the server runs with NCP_ALLOW_WRITE=true, and each
+    'service:action' must also be listed in NCP_WRITE_ALLOWLIST. Read-only actions are
+    rejected here; use ncp_call for those. Writes are never retried: on a timeout the
+    outcome is unknown, so check the resource state before trying again.
 
     Args:
         service: Ncloud service key (see ncp_call).
