@@ -1,0 +1,7 @@
+#!/bin/sh
+# Block commits that contain secrets. Requires gitleaks (https://github.com/gitleaks/gitleaks).
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "pre-commit: gitleaks not found. Install it, or commit is blocked." >&2
+  exit 1
+fi
+exec gitleaks git --pre-commit --staged --redact --config .gitleaks.toml --verbose

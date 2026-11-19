@@ -1,0 +1,22 @@
+title = "ncp-mcp gitleaks config"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "ncloud-configure-secret"
+description = "Ncloud CLI configure secret key"
+regex = '''(?i)ncloud_secret_access_key\s*=\s*['"]?([A-Za-z0-9/+_\-]{20,})'''
+secretGroup = 1
+
+[[rules]]
+id = "ncloud-env-secret"
+description = "Ncloud secret key in env/config"
+regex = '''(?i)NCLOUD_SECRET_KEY["']?\s*[:=]\s*['"]?([A-Za-z0-9/+_\-]{20,})'''
+secretGroup = 1
+
+[[rules]]
+id = "ncloud-access-key"
+description = "Ncloud access key id assignment"
+regex = '''(?i)(?:ncloud_access_key_id|NCLOUD_ACCESS_KEY)["']?\s*[:=]\s*['"]?([A-Za-z0-9_]{20,})'''
+secretGroup = 1
