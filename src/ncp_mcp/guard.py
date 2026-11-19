@@ -20,9 +20,12 @@ called through ncp_write with an explicit NCP_WRITE_ALLOWLIST entry.
 
 Writes need BOTH:
   * NCP_ALLOW_WRITE=true
-  * the exact "service:action" listed in NCP_WRITE_ALLOWLIST
-    (comma separated, e.g. "vserver:stopServerInstances,vserver:startServerInstances";
-    for REST services the action is the path, e.g. "subaccount:/sub-accounts")
+  * a matching entry in NCP_WRITE_ALLOWLIST (comma separated), "[METHOD ]service:action":
+      vserver:stopServerInstances          -> GET only (shared-gateway actions use GET)
+      POST subaccount:/sub-accounts        -> POST only
+      DELETE subaccount:/sub-accounts/123  -> DELETE only
+    An entry without a method allows GET only, so allowing a REST path for POST never
+    also allows DELETE on it.
 """
 
 from __future__ import annotations
@@ -85,17 +88,25 @@ def write_allowed() -> bool:
 
 
 def write_allowlist() -> frozenset[str]:
-    raw = os.environ.get("NCP_WRITE_ALLOWLIST", "")
-    return frozenset(x.strip() for x in raw.split(",") if x.strip())
+    """Normalized entries: 'METHOD service:/action' (method defaults to GET)."""
+    out = set()
+    for raw in os.environ.get("NCP_WRITE_ALLOWLIST", "").split(","):
+        entry = raw.strip()
+        if not entry:
+            continue
+        method, _, rest = entry.partition(" ")
+        if not rest:  # no method given
+            method, rest = "GET", entry
+        svc, sep, act = rest.strip().partition(":")
+        if sep:
+            out.add(write_key(method, svc, act))
+    return frozenset(out)
 
 
-def _norm_action(action: str) -> str:
-    return action.strip()
+def write_key(method: str, service: str, action: str) -> str:
+    """Canonical allowlist form, e.g. 'POST subaccount:/sub-accounts'."""
+    return f"{method.strip().upper()} {service.strip().lower()}:/{action.strip().lstrip('/')}"
 
 
-def write_permitted(service: str, action: str) -> bool:
-    allow = write_allowlist()
-    s = service.strip().lower()
-    a = _norm_action(action)
-    candidates = {f"{s}:{a}", f"{s}:{a.lstrip('/')}", f"{s}:/{a.lstrip('/')}"}
-    return bool(candidates & allow)
+def write_permitted(method: str, service: str, action: str) -> bool:
+    return write_key(method, service, action) in write_allowlist()

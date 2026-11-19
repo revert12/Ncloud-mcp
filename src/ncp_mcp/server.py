@@ -11,11 +11,12 @@ from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 
 from . import __version__, guard
-from .client import TIMEOUT, CallError, call
+from .client import MAX_RESULT_CHARS, TIMEOUT, CallError, call
 from .config import Profile, load_profiles
 
 MAX_BATCH = 50
 BATCH_CONCURRENCY = 5
+MIN_ITEM_CHARS = 5_000  # floor per batch item, so a 50-call batch still says something useful
 
 READ_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=True)
 WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=True, open_world_hint=True)
@@ -174,6 +175,8 @@ async def ncp_batch(
         return {"error": f"at most {MAX_BATCH} calls per batch"}
 
     sem = asyncio.Semaphore(BATCH_CONCURRENCY)
+    # The whole batch shares one result budget, split evenly across the calls.
+    item_chars = max(MIN_ITEM_CHARS, MAX_RESULT_CHARS // len(calls))
     allowed_keys = {"service", "action", "params", "fields", "profile", "paginate"}
 
     async def one(http: httpx.AsyncClient, idx: int, item: Any) -> dict[str, Any]:
@@ -186,12 +189,15 @@ async def ncp_batch(
             item_profile = item.get("profile") or profile
             if item_profile is not None and not isinstance(item_profile, str):
                 raise CallError("profile must be a string")
+            paginate = item.get("paginate", True)
+            if not isinstance(paginate, bool):
+                raise CallError("paginate must be true or false (JSON boolean, not a string)")
             p = _pick(item_profile)
             async with sem:
                 r = await call(
                     http, p, item["service"], item["action"], "GET",
-                    item.get("params"), None, bool(item.get("paginate", True)),
-                    item.get("fields"), "read",
+                    item.get("params"), None, paginate, item.get("fields"), "read",
+                    max_chars=item_chars,
                 )
         except CallError as exc:
             r = {"error": str(exc)}
@@ -215,8 +221,9 @@ async def ncp_write(
 ) -> dict[str, Any]:
     """Call one Ncloud API that creates, changes or deletes resources.
 
-    Only registered when the server runs with NCP_ALLOW_WRITE=true, and each
-    'service:action' must also be listed in NCP_WRITE_ALLOWLIST. Read-only actions are
+    Only registered when the server runs with NCP_ALLOW_WRITE=true, and each call must
+    match an NCP_WRITE_ALLOWLIST entry: 'service:action' for GET, or
+    'METHOD service:action' for other methods. Read-only actions are
     rejected here; use ncp_call for those. Writes are never retried: on a timeout the
     outcome is unknown, so check the resource state before trying again.
 
