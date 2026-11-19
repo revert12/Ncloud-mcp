@@ -394,4 +394,20 @@ async def _paginate(
         data = dict(data, items=items, hasNext=False if reason is None else data["hasNext"])
         return {"_data": data, "auto": True, "complete": reason is None, "pages": pages,
                 "returned": len(items), "total": total, **({"reason": reason} if reason else {})}
+
+    # Other list shapes (e.g. government Sub Account v2: totalElements) are not followed
+    # automatically, but an incomplete first page is reported instead of passing silently.
+    if isinstance(data, dict):
+        lists = [k for k, v in data.items() if isinstance(v, list)]
+        total_key = next((k for k in ("totalElements", "totalCount", "totalItems")
+                          if isinstance(data.get(k), int)), None)
+        if total_key and len(lists) == 1:
+            got = len(data[lists[0]])
+            total = data[total_key]
+            info = {"_data": data, "auto": False, "complete": got >= total, "pages": 1,
+                    "returned": got, "total": total}
+            if got < total:
+                info["reason"] = (f"only the first page was returned ({total_key}={total}); "
+                                  "request further pages explicitly")
+            return info
     return None

@@ -110,6 +110,14 @@ def test_rest_paging_follows_has_next():
     assert len(r["data"]["items"]) == 5
 
 
+def test_unknown_list_shape_reports_incomplete():
+    def handler(req):
+        return httpx.Response(200, json={"contents": SERVERS[:2], "totalElements": 5, "pageNo": 0})
+
+    r = run(handler, service="vserver", action="getRegionList")
+    assert r["paging"]["complete"] is False and r["truncated"]["total"] == 5
+
+
 # ---- retries ------------------------------------------------------------------------
 
 def test_read_retries_on_429_then_succeeds():
