@@ -1,5 +1,7 @@
 # ncp-mcp
 
+**한국어** | [English](README.en.md)
+
 NAVER Cloud Platform(Ncloud)용 가벼운 MCP 서버입니다.
 *A lightweight MCP server for NAVER Cloud Platform: a few generic tools instead of one tool per API.*
 
@@ -37,6 +39,11 @@ ncp_batch(calls=[
 - **조회와 변경을 도구 단위로 나눴습니다.** `ncp_call`·`ncp_batch`는 `get*`·`list*`·`describe*` 같은 조회 동작과
   REST 형식의 GET만 허용합니다. Ncloud의 공용 게이트웨이 API는 삭제 동작도 GET으로 받기 때문에
   HTTP 메서드가 아니라 **동작 이름**으로 판정합니다.
+- 판정 기준은 **"조회라고 확인된 것만 허용"**입니다. 공용 게이트웨이 서비스에서는 동작이 경로 한 단계짜리이고,
+  조회 동사로 시작하는 camelCase(`getServerInstanceList`)일 때만 조회로 봅니다.
+  `terminateserverinstances`·`TerminateServerInstances`·`terminateServerInstances/x`처럼 형식이 다르면 변경으로 보고 막습니다.
+- 조회 동작이지만 **비밀값을 돌려주는 동작**(`getRootPassword`, `getRootPasswordServerInstanceList`, NKS `kubeconfig`)은
+  `ncp_call`·`ncp_batch`에서 막습니다. 꼭 필요하면 `NCP_WRITE_ALLOWLIST`에 적은 뒤 `ncp_write`로 호출하세요.
 - 변경은 `ncp_write`로만 할 수 있고, 이 도구는 서버를 `NCP_ALLOW_WRITE=true`로 실행했을 때만 나타납니다.
   그리고 호출할 동작을 `NCP_WRITE_ALLOWLIST`에 하나씩 적어야 합니다(예: `vserver:stopServerInstances`). 변경 요청은 재시도하지 않습니다.
 - 호출할 수 있는 서비스는 존별 허용 목록(`src/ncp_mcp/endpoints.py`, NCP 공식 API 문서 기준)으로 제한합니다.
@@ -58,7 +65,7 @@ Python 3.10 이상, [uv](https://docs.astral.sh/uv/) 필요.
   "mcpServers": {
     "ncp": {
       "command": "uvx",
-      "args": ["--from", "git+https://github.com/<owner>/ncp-mcp@v0.2.0", "ncp-mcp"]
+      "args": ["--from", "git+https://github.com/revert12/Ncloud-mcp@v0.5.0", "ncp-mcp"]
     }
   }
 }
