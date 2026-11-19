@@ -8,6 +8,7 @@ from typing import Any
 
 import httpx
 from mcp.server.mcpserver import MCPServer
+from mcp.types import ToolAnnotations
 
 from . import __version__, guard
 from .client import TIMEOUT, CallError, call
@@ -15,6 +16,9 @@ from .config import Profile, default_profile_name, load_profiles
 
 MAX_BATCH = 50
 BATCH_CONCURRENCY = 5
+
+READ_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=True)
+WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=True, open_world_hint=True)
 
 mcp = MCPServer(
     "ncp-mcp",
@@ -25,9 +29,9 @@ mcp = MCPServer(
         "Shared-gateway services use https://ncloud.apigw.<zone>/<service>/v2/<action> "
         "(e.g. service='vserver', action='getServerInstanceList'); responseFormatType=json "
         "is added automatically. List parameters are passed as JSON arrays and are "
-        "expanded to name.1, name.2. Read-only actions are allowed; write actions are "
-        "blocked unless the server is started with NCP_ALLOW_WRITE=true. "
-        "Use ncp_batch for several independent reads (e.g. every region)."
+        "expanded to name.1, name.2. ncp_call and ncp_batch are read-only. "
+        "ncp_write exists only when the server is started with NCP_ALLOW_WRITE=true. "
+        "Use 'fields' to keep only the columns you need from large list responses."
     ),
 )
 
@@ -44,7 +48,16 @@ def _pick(profile: str | None) -> Profile:
     return profiles[name]
 
 
-@mcp.tool()
+async def _run(profile: str | None, **kwargs: Any) -> dict[str, Any]:
+    try:
+        p = _pick(profile)
+        async with httpx.AsyncClient(timeout=TIMEOUT) as http:
+            return await call(http, p, **kwargs)
+    except CallError as exc:
+        return {"error": str(exc)}
+
+
+@mcp.tool(annotations=READ_ONLY)
 def ncp_profiles() -> dict[str, Any]:
     """List credential profiles (secrets are never returned), the default profile and whether writes are enabled."""
     profiles = load_profiles()
@@ -56,42 +69,39 @@ def ncp_profiles() -> dict[str, Any]:
     }
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def ncp_call(
     service: str,
     action: str,
-    method: str = "GET",
     params: dict[str, Any] | None = None,
-    body: Any = None,
+    fields: list[str] | None = None,
     profile: str | None = None,
     paginate: bool = True,
 ) -> dict[str, Any]:
-    """Call one Ncloud API with request signing.
+    """Call one read-only Ncloud API (get*/list*/describe*/... or REST GET) with request signing.
 
     Args:
         service: Ncloud service key, e.g. 'vserver', 'vpc', 'vloadbalancer', 'vpostgresql',
             'billing', 'subaccount'. Unknown names map to the shared gateway /<service>/v2.
         action: Path under the service base, e.g. 'getServerInstanceList' or '/sub-accounts'.
-        method: HTTP method (default GET).
         params: Query parameters. Lists become name.1, name.2; dicts become name.key.
-        body: JSON body for POST/PUT/PATCH (REST-style services only).
+        fields: Keep only these keys in each list item (dot paths allowed,
+            e.g. ['serverName', 'serverInstanceStatus.code']).
         profile: Credential profile name from ncp_profiles (default profile if omitted).
-        paginate: Follow pageNo until totalRows is reached for read-only list actions.
+        paginate: Follow pageNo until totalRows is reached for list actions.
     """
-    try:
-        p = _pick(profile)
-        async with httpx.AsyncClient(timeout=TIMEOUT) as http:
-            return await call(http, p, service, action, method, params, body, paginate)
-    except CallError as exc:
-        return {"error": str(exc)}
+    return await _run(
+        profile, service=service, action=action, method="GET", params=params,
+        paginate=paginate, fields=fields, mode="read",
+    )
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def ncp_batch(calls: list[dict[str, Any]], profile: str | None = None) -> dict[str, Any]:
-    """Run several ncp_call requests concurrently and return results in the same order.
+    """Run several read-only ncp_call requests concurrently; results keep the input order.
 
-    Each item takes the same keys as ncp_call: service, action, and optionally method,
-    params, body, profile, paginate. A per-item 'profile' overrides the batch profile.
+    Each item takes the ncp_call keys: service, action, and optionally params, fields,
+    profile, paginate. A per-item 'profile' overrides the batch profile.
     Failures are reported per item and do not stop the others.
     """
     if not isinstance(calls, list) or not calls:
@@ -108,14 +118,9 @@ async def ncp_batch(calls: list[dict[str, Any]], profile: str | None = None) -> 
             p = _pick(item.get("profile") or profile)
             async with sem:
                 return await call(
-                    http,
-                    p,
-                    item["service"],
-                    item["action"],
-                    item.get("method", "GET"),
-                    item.get("params"),
-                    item.get("body"),
-                    item.get("paginate", True),
+                    http, p, item["service"], item["action"], "GET",
+                    item.get("params"), None, item.get("paginate", True),
+                    item.get("fields"), "read",
                 )
         except CallError as exc:
             return {"error": str(exc)}
@@ -123,6 +128,37 @@ async def ncp_batch(calls: list[dict[str, Any]], profile: str | None = None) -> 
     async with httpx.AsyncClient(timeout=TIMEOUT) as http:
         results = await asyncio.gather(*(one(http, c) for c in calls))
     return {"count": len(results), "results": list(results)}
+
+
+async def ncp_write(
+    service: str,
+    action: str,
+    method: str = "GET",
+    params: dict[str, Any] | None = None,
+    body: Any = None,
+    profile: str | None = None,
+) -> dict[str, Any]:
+    """Call one Ncloud API that creates, changes or deletes resources.
+
+    Only registered when the server runs with NCP_ALLOW_WRITE=true. Read-only actions
+    are rejected here; use ncp_call for those.
+
+    Args:
+        service: Ncloud service key (see ncp_call).
+        action: e.g. 'stopServerInstances', 'deletePublicIpInstance', or a REST path.
+        method: HTTP method. Shared-gateway actions accept GET; REST services use POST/PUT/DELETE.
+        params: Query parameters (lists become name.1, name.2).
+        body: JSON body for REST-style services.
+        profile: Credential profile name from ncp_profiles.
+    """
+    return await _run(
+        profile, service=service, action=action, method=method, params=params,
+        body=body, paginate=False, mode="write",
+    )
+
+
+if guard.write_allowed():
+    mcp.tool(annotations=WRITE)(ncp_write)
 
 
 def main() -> None:

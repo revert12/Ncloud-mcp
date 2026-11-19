@@ -13,12 +13,14 @@ API마다 도구를 하나씩 만들지 않고, **서명된 범용 호출 도구
 | 도구 | 설명 |
 |---|---|
 | `ncp_profiles` | 사용 가능한 자격증명 프로필·존·기본 프로필·쓰기 허용 여부 (비밀값은 반환하지 않음) |
-| `ncp_call` | API 1건 호출. 서명, `responseFormatType=json`, 목록 파라미터 펼치기, 페이지 자동 넘김 |
-| `ncp_batch` | 여러 호출을 동시에 실행(최대 50건, 동시 5건). 항목별 실패는 다른 항목에 영향 없음 |
+| `ncp_call` | **조회 전용** API 1건 호출. 서명, `responseFormatType=json`, 목록 파라미터 펼치기, 페이지 자동 넘김, `fields`로 필요한 필드만 반환 |
+| `ncp_batch` | 조회 여러 건을 동시에 실행(최대 50건, 동시 5건). 항목별 실패는 다른 항목에 영향 없음 |
+| `ncp_write` | 생성·변경·삭제 API 호출. **`NCP_ALLOW_WRITE=true`로 실행했을 때만 등록됨** |
 
 ```jsonc
-// 서버 목록
-ncp_call(service="vserver", action="getServerInstanceList", params={"regionCode": "KR"})
+// 서버 목록 (필요한 필드만)
+ncp_call(service="vserver", action="getServerInstanceList", params={"regionCode": "KR"},
+         fields=["serverName", "serverInstanceStatus.code", "privateIp"])
 
 // 서브계정 목록 (REST 형식 서비스)
 ncp_call(service="subaccount", action="/sub-accounts")
@@ -32,9 +34,13 @@ ncp_batch(calls=[
 
 ## 안전장치
 
-- **기본은 읽기 전용입니다.** `get*`·`list*`·`describe*` 같은 조회 동작과 REST 형식의 GET만 허용합니다.
-  Ncloud의 공용 게이트웨이 API는 삭제 동작도 GET으로 받기 때문에 HTTP 메서드가 아니라 **동작 이름**으로 판정합니다.
-  쓰기를 허용하려면 서버를 `NCP_ALLOW_WRITE=true`로 실행하세요.
+- **조회와 변경을 도구 단위로 나눴습니다.** `ncp_call`·`ncp_batch`는 `get*`·`list*`·`describe*` 같은 조회 동작과
+  REST 형식의 GET만 허용합니다. Ncloud의 공용 게이트웨이 API는 삭제 동작도 GET으로 받기 때문에
+  HTTP 메서드가 아니라 **동작 이름**으로 판정합니다.
+- 변경은 `ncp_write`로만 할 수 있고, 이 도구는 서버를 `NCP_ALLOW_WRITE=true`로 실행했을 때만 나타납니다.
+- 도구마다 MCP 표준 표시(`readOnlyHint`/`destructiveHint`)를 붙였습니다. 클라이언트 권한 설정에서
+  **`ncp_call`·`ncp_batch`는 허용, `ncp_write`는 매번 확인**으로 나눠 두는 것을 권장합니다.
+  (Claude Code 예: `permissions.allow`에 `mcp__ncp__ncp_call`, `permissions.ask`에 `mcp__ncp__ncp_write`)
 - 서명된 요청은 선택한 존의 API 게이트웨이 도메인(`*.apigw.ntruss.com` 등)으로만 보냅니다.
 - 키는 오류 메시지와 결과에 포함하지 않습니다. 최종 권한 경계는 Access Key의 서브계정 권한이므로 **조회 권한만 준 서브계정 키** 사용을 권장합니다.
 
@@ -48,7 +54,7 @@ Python 3.10 이상, [uv](https://docs.astral.sh/uv/) 필요.
   "mcpServers": {
     "ncp": {
       "command": "uvx",
-      "args": ["--from", "git+https://github.com/<owner>/ncp-mcp@v0.1.0", "ncp-mcp"]
+      "args": ["--from", "git+https://github.com/<owner>/ncp-mcp@v0.2.0", "ncp-mcp"]
     }
   }
 }

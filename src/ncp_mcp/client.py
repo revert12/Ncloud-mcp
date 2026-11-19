@@ -102,6 +102,22 @@ async def _send(
     return resp.status_code, payload
 
 
+def _pick_field(item: Any, path: str) -> Any:
+    cur = item
+    for part in path.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return None
+        cur = cur[part]
+    return cur
+
+
+def project(items: list, fields: list[str]) -> list:
+    """Keep only ``fields`` (dot paths allowed, e.g. 'serverInstanceStatus.code')."""
+    return [
+        {f: _pick_field(it, f) for f in fields} if isinstance(it, dict) else it for it in items
+    ]
+
+
 async def call(
     http: httpx.AsyncClient,
     profile: Profile,
@@ -111,6 +127,8 @@ async def call(
     params: dict[str, Any] | None = None,
     body: Any = None,
     paginate: bool = True,
+    fields: list[str] | None = None,
+    mode: str = "read",
 ) -> dict[str, Any]:
     method = method.upper()
     if method not in ("GET", "POST", "PUT", "PATCH", "DELETE"):
@@ -125,11 +143,17 @@ async def call(
 
     path = _build_path(base, action)
     read_only = guard.is_read_only(method, path)
-    if not read_only and not guard.write_allowed():
+    if mode == "read" and not read_only:
         raise CallError(
             f"blocked: {method} {path} is classified as a write operation. "
-            "Writes are disabled unless the server runs with NCP_ALLOW_WRITE=true."
+            "ncp_call/ncp_batch are read-only; use ncp_write (available only when the "
+            "server runs with NCP_ALLOW_WRITE=true)."
         )
+    if mode == "write":
+        if read_only:
+            raise CallError(f"{method} {path} is read-only; use ncp_call instead.")
+        if not guard.write_allowed():
+            raise CallError("writes are disabled (start the server with NCP_ALLOW_WRITE=true).")
 
     params = dict(params or {})
     shared = service.strip().lower() not in endpoints.SPECIAL
@@ -169,6 +193,13 @@ async def call(
             pages += 1
         if len(items) < total:
             result["truncated"] = {"returned": len(items), "totalRows": total}
+    if fields:
+        target = page or _find_page(data)
+        if target:
+            node, list_key, _ = target
+            node[list_key] = project(node[list_key], fields)
+        else:
+            result["fields_note"] = "no list found in response; fields ignored"
     result["pages"] = pages
     result["data"] = data
     return result
