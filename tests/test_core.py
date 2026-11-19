@@ -53,7 +53,13 @@ def test_resolve_zones():
     assert endpoints.resolve("pub", "vserver") == ("ncloud.apigw.ntruss.com", "/vserver/v2")
     assert endpoints.resolve("gov", "vserver") == ("ncloud.apigw.gov-ntruss.com", "/vserver/v2")
     assert endpoints.resolve("pub", "subaccount") == ("subaccount.apigw.ntruss.com", "/api/v1")
-    assert endpoints.resolve("gov", "sts") == ("sts.apigw.gov-ntruss.com", "/api/v1")
+    assert endpoints.resolve("pub", "sts") == ("sts.apigw.ntruss.com", "/api/v1")
+    assert endpoints.resolve("gov", "subaccount") == ("subaccount.apigw.gov-ntruss.com", "/api/v2")
+    assert endpoints.resolve("fin", "billing") == ("billingapi.apigw-pub.fin-ntruss.com", "/billing/v1")
+    with pytest.raises(endpoints.NotAllowed):
+        endpoints.resolve("gov", "sts")          # not documented for gov
+    with pytest.raises(endpoints.NotAllowed):
+        endpoints.resolve("pub", "madeupservice")
     assert endpoints.resolve("fin", "vserver")[0] == "fin-ncloud.apigw.fin-ntruss.com"
     with pytest.raises(ValueError):
         endpoints.resolve("pub", "evil.com/x")
